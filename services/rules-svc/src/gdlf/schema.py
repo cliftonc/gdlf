@@ -58,7 +58,10 @@ class Kid(BaseModel):
     age: int | None = None
     devices: list[Device] = []
     schedule: Schedule = Schedule()
-    blocklists: list[str] = []
+    # AdGuard "blocked services" IDs (e.g. "tiktok", "youtube"). The catalog
+    # comes from AdGuard (GET /control/blocked_services/all); we just persist
+    # which ones are toggled on for this kid and push them into each AdGuard
+    # client's per-client `blocked_services` array.
     blocked_apps: list[str] = []
     url_rules: list[URLRule] = []
     keyword_flags: list[str] = []
@@ -68,25 +71,14 @@ class Kid(BaseModel):
     # Parent-toggled "off switch" for the whole kid. When true, every one of
     # their devices is added to nftables' blocked_clients (overrides bonus).
     manual_block: bool = False
-
-
-class Blocklist(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    description: str = ""
-    sources: list[str] = []
-
-
-class App(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    hosts: list[str] = []
-    ip_ranges: list[str] = []
+    # Hosts (fnmatch globs) that mitmproxy should let through untouched — for
+    # pinned-cert apps that refuse our CA. Matched against TLS SNI.
+    mitm_passthrough_hosts: list[str] = []
 
 
 class KidsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kids: list[Kid] = []
-    blocklists: dict[str, Blocklist] = {}
-    apps: dict[str, App] = {}
 
     def kid(self, name: str) -> Kid | None:
         return next((k for k in self.kids if k.name == name), None)

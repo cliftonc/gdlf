@@ -24,9 +24,19 @@ def _filtered_events(kid, decision, include_sni, include_assets, limit=50):
     raw_limit = limit if (include_sni and include_assets) else max(1000, limit * 20)
     events = db.recent_events(limit=raw_limit, kid=kid, decision=decision)
     if not include_sni:
+        # Only hide the old passive `sni_only` decision (informational taps).
+        # `tls_failed` is a real signal — pinned-cert app needs passthrough —
+        # and `passthrough` is an audit trail of what we let through. Both
+        # stay visible regardless of the toggle.
         events = [e for e in events if e.decision != "sni_only"]
     if not include_assets:
-        events = [e for e in events if (e.kind or "page") == "page"]
+        # tls_failed / passthrough have kind="unknown" (or None) since there's
+        # no request body to classify — always keep them visible.
+        events = [
+            e for e in events
+            if (e.kind or "page") == "page"
+            or e.decision in ("tls_failed", "passthrough")
+        ]
     return events[:limit]
 
 

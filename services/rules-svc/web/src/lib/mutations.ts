@@ -84,6 +84,66 @@ export function useKidBlock(name: string) {
   });
 }
 
+export function useAddPassthrough(name: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (host: string) =>
+      api(`/api/kids/${encodeURIComponent(name)}/passthrough`, {
+        method: "POST",
+        body: { host },
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
+  });
+}
+
+export function useRemovePassthrough(name: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (host: string) =>
+      api(
+        `/api/kids/${encodeURIComponent(name)}/passthrough/${encodeURIComponent(host)}`,
+        { method: "DELETE" }
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
+  });
+}
+
+export function useSetBlockedApps(name: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (blocked_apps: string[]) =>
+      api(`/api/kids/${encodeURIComponent(name)}/blocked-apps`, {
+        method: "PUT",
+        body: { blocked_apps },
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
+  });
+}
+
+export function useSetPassthrough(name: string) {
+  // Atomic replace — used by the group-switch UI so toggling on/off applies
+  // both the apex and `*.<reg>` patterns (or removes them) in one shot.
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (hosts: string[]) =>
+      api(`/api/kids/${encodeURIComponent(name)}/passthrough`, {
+        method: "PUT",
+        body: { hosts },
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
+  });
+}
+
+export function useDismissTlsFailure() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (failureId: number) =>
+      api(`/api/tls-failures/${failureId}`, { method: "DELETE" }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["tls-failures"], exact: false }),
+  });
+}
+
 export function useCreateDevice(name: string) {
   const qc = useQueryClient();
   return useMutation({

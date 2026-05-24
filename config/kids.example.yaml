@@ -15,38 +15,12 @@ kids:
     schedule:
       weekday: { allowed: "07:00-21:00" }
       weekend: { allowed: "08:00-22:00" }
-    blocklists: [adult, gambling]   # references entries below
-    blocked_apps: []                # references entries below
+    # AdGuard blocked-service IDs — toggle via the dashboard's "Services"
+    # tab on the kid. Catalog comes from AdGuard (/control/blocked_services/all).
+    blocked_apps: []
     url_rules:
       # Examples — first match wins.
       # - { action: block, match: "youtube.com/shorts/*" }
       # - { action: block, match: "*/search", query: "q=.*\\bweed\\b.*", flag: true }
       # - { action: allow, match: "youtube.com/@KhanAcademy/*" }
     keyword_flags: []
-
-# Reusable category blocklists. Referenced by name from kids[].blocklists.
-# Managed via AdGuard's UI for now; this section is a record/intent.
-blocklists:
-  adult:
-    description: "Adult / NSFW content"
-    sources:
-      - https://big.oisd.nl/
-  gambling:
-    description: "Gambling sites"
-    sources:
-      - https://blocklistproject.github.io/Lists/gambling.txt
-  social-media-aggressive:
-    description: "Heavy social-media block (TikTok / Snap / IG)"
-    sources:
-      - https://blocklistproject.github.io/Lists/tiktok.txt
-      - https://blocklistproject.github.io/Lists/everything.txt
-
-# Reusable app definitions — hosts (and optional IP ranges) per name.
-# Referenced by kids[].blocked_apps.
-apps:
-  tiktok:
-    hosts: [tiktok.com, tiktokcdn.com, tiktokv.com, byteoversea.com, musical.ly]
-    ip_ranges: []
-  discord:
-    hosts: [discord.com, discord.gg, discordapp.com, discordapp.net]
-    ip_ranges: []

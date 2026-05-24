@@ -17,7 +17,15 @@ export const Route = createFileRoute("/activity")({
   component: ActivityPage,
 });
 
-const DECISIONS = ["block", "allow", "flag", "sni_only", "dns_block"];
+const DECISIONS = [
+  "block",
+  "allow",
+  "flag",
+  "tls_failed",
+  "passthrough",
+  "sni_only",
+  "dns_block",
+];
 
 function ActivityPage() {
   const kids = useKids();

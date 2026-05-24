@@ -10,7 +10,6 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SettingsRouteImport } from './routes/settings'
-import { Route as RulesRouteImport } from './routes/rules'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ActivityRouteImport } from './routes/activity'
 import { Route as IndexRouteImport } from './routes/index'
@@ -24,11 +23,6 @@ import { Route as KidsNameDevicesIpEnrolRouteImport } from './routes/kids.$name.
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RulesRoute = RulesRouteImport.update({
-  id: '/rules',
-  path: '/rules',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -81,7 +75,6 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
   '/login': typeof LoginRoute
-  '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/kids/': typeof KidsIndexRoute
   '/kids/$name/': typeof KidsNameIndexRoute
@@ -94,7 +87,6 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
   '/login': typeof LoginRoute
-  '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/kids': typeof KidsIndexRoute
   '/kids/$name': typeof KidsNameIndexRoute
@@ -108,7 +100,6 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/activity': typeof ActivityRoute
   '/login': typeof LoginRoute
-  '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/kids/': typeof KidsIndexRoute
   '/kids/$name/': typeof KidsNameIndexRoute
@@ -123,7 +114,6 @@ export interface FileRouteTypes {
     | '/'
     | '/activity'
     | '/login'
-    | '/rules'
     | '/settings'
     | '/kids/'
     | '/kids/$name/'
@@ -136,7 +126,6 @@ export interface FileRouteTypes {
     | '/'
     | '/activity'
     | '/login'
-    | '/rules'
     | '/settings'
     | '/kids'
     | '/kids/$name'
@@ -149,7 +138,6 @@ export interface FileRouteTypes {
     | '/'
     | '/activity'
     | '/login'
-    | '/rules'
     | '/settings'
     | '/kids/'
     | '/kids/$name/'
@@ -163,7 +151,6 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ActivityRoute: typeof ActivityRoute
   LoginRoute: typeof LoginRoute
-  RulesRoute: typeof RulesRoute
   SettingsRoute: typeof SettingsRoute
   KidsIndexRoute: typeof KidsIndexRoute
   KidsNameIndexRoute: typeof KidsNameIndexRoute
@@ -180,13 +167,6 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof SettingsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/rules': {
-      id: '/rules'
-      path: '/rules'
-      fullPath: '/rules'
-      preLoaderRoute: typeof RulesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -259,7 +239,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ActivityRoute: ActivityRoute,
   LoginRoute: LoginRoute,
-  RulesRoute: RulesRoute,
   SettingsRoute: SettingsRoute,
   KidsIndexRoute: KidsIndexRoute,
   KidsNameIndexRoute: KidsNameIndexRoute,

@@ -33,6 +33,18 @@ class BlockBody(BaseModel):
     blocked: bool
 
 
+class PassthroughBody(BaseModel):
+    hosts: list[str]
+
+
+class PassthroughAddBody(BaseModel):
+    host: str
+
+
+class BlockedAppsBody(BaseModel):
+    blocked_apps: list[str]
+
+
 @router.get("")
 def list_kids() -> dict:
     cfg = store.load()
@@ -142,6 +154,67 @@ def block_kid(name: str, body: BlockBody) -> dict:
 
     store.mutate(upd)
     return {"manual_block": body.blocked}
+
+
+@router.put("/{name}/passthrough")
+def set_passthrough(name: str, body: PassthroughBody) -> dict:
+    cleaned = sorted({h.strip().lower() for h in body.hosts if h and h.strip()})
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.mitm_passthrough_hosts = cleaned
+
+    store.mutate(upd)
+    return {"mitm_passthrough_hosts": cleaned}
+
+
+@router.post("/{name}/passthrough")
+def add_passthrough(name: str, body: PassthroughAddBody) -> dict:
+    host = body.host.strip().lower()
+    if not host:
+        raise HTTPException(400, "host required")
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        if host not in kid.mitm_passthrough_hosts:
+            kid.mitm_passthrough_hosts = sorted([*kid.mitm_passthrough_hosts, host])
+
+    store.mutate(upd)
+    cfg = store.load(force=True)
+    return {"mitm_passthrough_hosts": list(cfg.kid(name).mitm_passthrough_hosts)}
+
+
+@router.delete("/{name}/passthrough/{host}")
+def remove_passthrough(name: str, host: str) -> dict:
+    target = host.strip().lower()
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.mitm_passthrough_hosts = [h for h in kid.mitm_passthrough_hosts if h != target]
+
+    store.mutate(upd)
+    cfg = store.load(force=True)
+    return {"mitm_passthrough_hosts": list(cfg.kid(name).mitm_passthrough_hosts)}
+
+
+@router.put("/{name}/blocked-apps")
+def set_blocked_apps(name: str, body: BlockedAppsBody) -> dict:
+    cleaned = sorted({s.strip() for s in body.blocked_apps if s and s.strip()})
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.blocked_apps = cleaned
+
+    store.mutate(upd)
+    return {"blocked_apps": cleaned}
 
 
 @router.delete("/{name}", status_code=204)

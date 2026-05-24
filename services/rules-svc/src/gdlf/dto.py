@@ -74,9 +74,9 @@ def kid_detail_dto(k: Kid, handshakes: dict[str, dict]) -> dict[str, Any]:
             "weekday": k.schedule.weekday.allowed,
             "weekend": k.schedule.weekend.allowed,
         },
-        "blocklists": list(k.blocklists),
         "blocked_apps": list(k.blocked_apps),
         "keyword_flags": list(k.keyword_flags),
+        "mitm_passthrough_hosts": list(k.mitm_passthrough_hosts),
         "devices": [device_dto(d, handshakes.get(d.wg_ip)) for d in k.devices],
         "rules": [rule_dto(r) for r in k.url_rules],
     }

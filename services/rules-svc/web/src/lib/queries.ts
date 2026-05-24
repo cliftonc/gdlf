@@ -6,15 +6,17 @@ import {
   HandshakeSchema,
   KidDetailSchema,
   KidSummarySchema,
-  LibrarySchema,
+  ServiceCatalogSchema,
   SettingsSchema,
+  TlsFailureGroupSchema,
   type Enrolment,
   type Event,
   type Handshake,
   type KidDetail,
   type KidSummary,
-  type Library,
+  type ServiceCatalog,
   type Settings,
+  type TlsFailureGroup,
 } from "./schemas";
 import { z } from "zod";
 
@@ -25,8 +27,10 @@ export const qk = {
   enrolment: (name: string, ip: string) => ["enrolment", name, ip] as const,
   handshake: (ip: string) => ["handshake", ip] as const,
   activity: (params: ActivityParams) => ["activity", params] as const,
+  tlsFailures: (kid: string | null | undefined) =>
+    ["tls-failures", kid ?? null] as const,
   settings: ["settings"] as const,
-  library: ["library"] as const,
+  services: ["services"] as const,
   ruleSuggest: (host: string, path: string) => ["rule-suggest", host, path] as const,
 };
 
@@ -102,6 +106,20 @@ export function useActivity(params: ActivityParams) {
   });
 }
 
+export function useTlsFailures(kid: string | null | undefined) {
+  return useQuery({
+    queryKey: qk.tlsFailures(kid),
+    queryFn: async () => {
+      const qs = kid ? `?kid=${encodeURIComponent(kid)}` : "";
+      const data = await api<{ groups: unknown[] }>(`/api/tls-failures${qs}`);
+      return z.array(TlsFailureGroupSchema).parse(data.groups) as TlsFailureGroup[];
+    },
+    // Poll while the Passthrough tab is open — new failures arrive
+    // asynchronously from the addon and the user expects to see them.
+    refetchInterval: 8_000,
+  });
+}
+
 export function useSettings() {
   return useQuery({
     queryKey: qk.settings,
@@ -109,10 +127,13 @@ export function useSettings() {
   });
 }
 
-export function useLibrary() {
+export function useServices() {
   return useQuery({
-    queryKey: qk.library,
-    queryFn: async () => LibrarySchema.parse(await api<unknown>("/api/rules/library")) as Library,
+    queryKey: qk.services,
+    queryFn: async () =>
+      ServiceCatalogSchema.parse(await api<unknown>("/api/services")) as ServiceCatalog,
+    // Catalog is global and effectively static — cache aggressively.
+    staleTime: 5 * 60_000,
   });
 }
 

@@ -61,9 +61,9 @@ export const KidDetailSchema = z.object({
   manual_block: z.boolean(),
   bonus_until: z.string().nullable(),
   schedule: ScheduleSchema,
-  blocklists: z.array(z.string()),
   blocked_apps: z.array(z.string()),
   keyword_flags: z.array(z.string()),
+  mitm_passthrough_hosts: z.array(z.string()),
   devices: z.array(DeviceSchema),
   rules: z.array(RuleSchema),
 });
@@ -117,6 +117,26 @@ export const EnrolmentSchema = z.object({
 });
 export type Enrolment = z.infer<typeof EnrolmentSchema>;
 
+export const TlsFailureChildSchema = z.object({
+  id: z.number().nullable(),
+  host: z.string(),
+  device: z.string().nullable(),
+  client_ip: z.string(),
+  count: z.number(),
+  ts_first: z.string().nullable(),
+  ts_last: z.string().nullable(),
+});
+export type TlsFailureChild = z.infer<typeof TlsFailureChildSchema>;
+
+export const TlsFailureGroupSchema = z.object({
+  registrable: z.string(),
+  kid: z.string().nullable(),
+  count: z.number(),
+  ts_last: z.string().nullable(),
+  children: z.array(TlsFailureChildSchema),
+});
+export type TlsFailureGroup = z.infer<typeof TlsFailureGroupSchema>;
+
 export const HandshakeSchema = z.object({
   last_handshake: z.number(),
   rx: z.number(),
@@ -124,14 +144,25 @@ export const HandshakeSchema = z.object({
 });
 export type Handshake = z.infer<typeof HandshakeSchema>;
 
-export const LibrarySchema = z.object({
-  blocklists: z.record(
-    z.string(),
-    z.object({ description: z.string(), sources: z.array(z.string()) })
-  ),
-  apps: z.record(
-    z.string(),
-    z.object({ hosts: z.array(z.string()), ip_ranges: z.array(z.string()) })
-  ),
+export const ServiceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  icon_svg: z.string().optional().default(""),
+  group_id: z.string().optional().default(""),
+  rules: z.array(z.string()).optional().default([]),
 });
-export type Library = z.infer<typeof LibrarySchema>;
+export type Service = z.infer<typeof ServiceSchema>;
+
+export const ServiceGroupSchema = z.object({
+  id: z.string(),
+  // AdGuard's catalog ships group ids only (e.g. "ai", "cdn"); no display
+  // name is provided over the API — the dashboard humanizes the id itself.
+  name: z.string().optional(),
+});
+export type ServiceGroup = z.infer<typeof ServiceGroupSchema>;
+
+export const ServiceCatalogSchema = z.object({
+  groups: z.array(ServiceGroupSchema),
+  services: z.array(ServiceSchema),
+});
+export type ServiceCatalog = z.infer<typeof ServiceCatalogSchema>;

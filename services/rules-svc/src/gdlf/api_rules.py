@@ -1,4 +1,4 @@
-"""URL-rule CRUD + suggestion + read-only library."""
+"""URL-rule CRUD + suggestion."""
 from __future__ import annotations
 
 import re
@@ -125,18 +125,3 @@ def move_rule(name: str, idx: int, body: MoveBody) -> dict:
 @router.get("/api/rules/suggest")
 def suggest(host: str = "", path: str = "") -> dict:
     return {"suggested": rules_mod.suggest_match(host, path)}
-
-
-@router.get("/api/rules/library")
-def library() -> dict:
-    cfg = store.load()
-    return {
-        "blocklists": {
-            name: {"description": bl.description, "sources": list(bl.sources)}
-            for name, bl in cfg.blocklists.items()
-        },
-        "apps": {
-            name: {"hosts": list(app.hosts), "ip_ranges": list(app.ip_ranges)}
-            for name, app in cfg.apps.items()
-        },
-    }

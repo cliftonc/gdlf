@@ -16,6 +16,7 @@ dependencies = [
     "qrcode[pil]>=8.0",
     "cryptography>=43.0",
     "sse-starlette>=2.1",
+    "tldextract>=5.1",
 ]
 
 [build-system]

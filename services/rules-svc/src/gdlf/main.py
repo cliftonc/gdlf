@@ -34,7 +34,9 @@ from . import (
     api_devices,
     api_kids,
     api_rules,
+    api_services,
     api_settings,
+    api_tls_failures,
     auth,
     db,
     pubsub,
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError:
         pass
     db.engine()
+    store.bind_event_loop(asyncio.get_running_loop())
     sync_task = asyncio.create_task(adguard.sync_loop())
     prune_task = asyncio.create_task(_prune_loop())
     try:
@@ -89,8 +92,10 @@ app.include_router(api_auth.router)
 app.include_router(api_kids.router)
 app.include_router(api_devices.router)
 app.include_router(api_rules.router)
+app.include_router(api_services.router)
 app.include_router(api_activity.router)
 app.include_router(api_settings.router)
+app.include_router(api_tls_failures.router)
 
 # Where the multi-stage Dockerfile lands the built SPA. The dev server
 # (`./gdlf web-dev`) runs Vite separately and proxies /api back to here, so
@@ -115,6 +120,8 @@ _PUBLIC_PREFIXES = ("/assets/",)
 _PUBLIC_API_PATHS = {
     "/api/decision",
     "/api/events",
+    "/api/passthrough",
+    "/api/tls-failures",
     "/api/auth/login",
 }
 _PUBLIC_FILES = {"/favicon.png", "/logo-64.png", "/logo-256.png", "/gandalf.png"}
@@ -302,6 +309,26 @@ def _in_any_window(now, spec: str) -> bool:
     return False
 
 
+@app.get("/api/passthrough")
+def get_passthrough():
+    """Map of `wg_ip -> [host glob]` consumed by the mitmproxy addon.
+
+    The addon polls this every ~30s and consults it in `tls_clienthello` to
+    decide whether to forward TLS untouched (for pinned-cert apps that refuse
+    our CA). Public-but-trusted: the mitm container runs in wg's netns and
+    reaches rules-svc over the bridge with no cookie.
+    """
+    cfg = store.load()
+    out: dict[str, list[str]] = {}
+    for kid in cfg.kids:
+        if not kid.mitm_passthrough_hosts:
+            continue
+        for d in kid.devices:
+            if d.wg_ip:
+                out[d.wg_ip] = list(kid.mitm_passthrough_hosts)
+    return JSONResponse({"by_ip": out})
+
+
 @app.post("/api/decision")
 async def post_decision(request: Request):
     """mitmproxy asks: 'for this request, what should I do?'
@@ -328,7 +355,23 @@ async def post_decision(request: Request):
             }
         )
 
-    decision = evaluate(kid, payload.get("host", ""), payload.get("path", "/"), payload.get("query"))
+    host = payload.get("host", "")
+    decision = evaluate(kid, host, payload.get("path", "/"), payload.get("query"))
+    if decision.action == "allow":
+        # AdGuard handles DNS-layer blocking, but a device that cached an IP
+        # (or uses DoH/DoT to bypass) reaches mitm directly. Enforce the same
+        # blocked_apps list here using the catalog's host index.
+        svc = adguard.host_blocked_service_for_kid(kid, host)
+        if svc:
+            return JSONResponse(
+                {
+                    "action": "block",
+                    "kid": kid.name,
+                    "kid_age": kid.age,
+                    "rule": f"blocked service: {svc}",
+                    "flag": False,
+                }
+            )
     return JSONResponse(
         {
             "action": decision.action,

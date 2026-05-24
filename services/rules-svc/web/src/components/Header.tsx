@@ -17,7 +17,6 @@ import { useLogout } from "../lib/mutations";
 const NAV: { to: string; label: string; match: string }[] = [
   { to: "/kids", label: "Kids", match: "/kids" },
   { to: "/activity", label: "Activity", match: "/activity" },
-  { to: "/rules", label: "Rules", match: "/rules" },
   { to: "/settings", label: "Settings", match: "/settings" },
 ];
 

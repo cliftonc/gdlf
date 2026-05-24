@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from .settings import settings
@@ -43,6 +44,34 @@ class Handshake(SQLModel, table=True):
     last_seen: datetime = Field(default_factory=datetime.utcnow)
     bytes_rx: int = 0
     bytes_tx: int = 0
+
+
+class TlsFailure(SQLModel, table=True):
+    """Per-(kid, host) observation of a TLS handshake failure.
+
+    Populated by the mitmproxy addon. The Passthrough tab in the dashboard
+    groups these by registrable domain (eTLD+1) so the parent can enable
+    `*.reddit.com` style passthrough with one switch instead of allowing
+    every subdomain separately.
+
+    Distinct from `Event` because (a) it's a long-lived observation
+    (count + first/last seen, not one-row-per-occurrence), and (b) we want
+    it out of the activity log — pinned-cert apps would otherwise dominate.
+    """
+    __tablename__ = "tls_failures"
+    __table_args__ = (
+        UniqueConstraint("kid", "host", name="uq_tls_failures_kid_host"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    ts_first: datetime = Field(default_factory=datetime.utcnow)
+    ts_last: datetime = Field(default_factory=datetime.utcnow, index=True)
+    count: int = 1
+    kid: str | None = Field(default=None, index=True)
+    device: str | None = None
+    client_ip: str
+    host: str = Field(index=True)
+    # Public-suffix-aware registrable domain (eTLD+1) used to group rows.
+    registrable: str = Field(index=True)
 
 
 class AlertLog(SQLModel, table=True):
@@ -97,6 +126,67 @@ def recent_events(limit: int = 200, kid: str | None = None, decision: str | None
         return list(s.exec(stmt).all())
 
 
+def upsert_tls_failure(
+    *,
+    kid: str | None,
+    device: str | None,
+    client_ip: str,
+    host: str,
+    registrable: str,
+) -> None:
+    """Insert or bump-the-counter for a (kid, host) TLS failure observation.
+
+    `kid` may be None when the source IP doesn't resolve to a known device
+    (orphaned WG peer). We still store those — at least the parent can see
+    something failed somewhere, and they get pruned naturally over time.
+    """
+    now = datetime.utcnow()
+    with session() as s:
+        stmt = select(TlsFailure).where(
+            TlsFailure.kid == kid,
+            TlsFailure.host == host,
+        )
+        existing = s.exec(stmt).first()
+        if existing:
+            existing.ts_last = now
+            existing.count += 1
+            existing.client_ip = client_ip
+            if device:
+                existing.device = device
+            s.add(existing)
+        else:
+            s.add(
+                TlsFailure(
+                    kid=kid,
+                    device=device,
+                    client_ip=client_ip,
+                    host=host,
+                    registrable=registrable,
+                    ts_first=now,
+                    ts_last=now,
+                )
+            )
+        s.commit()
+
+
+def list_tls_failures(kid: str | None = None) -> list[TlsFailure]:
+    with session() as s:
+        stmt = select(TlsFailure).order_by(TlsFailure.ts_last.desc())
+        if kid:
+            stmt = stmt.where(TlsFailure.kid == kid)
+        return list(s.exec(stmt).all())
+
+
+def delete_tls_failure(failure_id: int) -> bool:
+    with session() as s:
+        row = s.get(TlsFailure, failure_id)
+        if not row:
+            return False
+        s.delete(row)
+        s.commit()
+        return True
+
+
 def stats() -> dict:
     """Return event-table size info for the Settings page."""
     from sqlmodel import func
@@ -125,6 +215,7 @@ def prune(retention_days: int, max_events: int) -> dict:
     cutoff = datetime.utcnow() - timedelta(days=retention_days)
     age_deleted = 0
     cap_deleted = 0
+    tls_deleted = 0
     with session() as s:
         res = s.exec(delete(Event).where(Event.ts < cutoff))
         age_deleted = res.rowcount or 0
@@ -139,7 +230,17 @@ def prune(retention_days: int, max_events: int) -> dict:
                 s.exec(delete(Event).where(Event.id.in_(ids_to_drop)))
                 cap_deleted = len(ids_to_drop)
                 s.commit()
-    return {"age_deleted": age_deleted, "cap_deleted": cap_deleted}
+        # Same age cutoff for tls_failures — if a host hasn't failed in
+        # `retention_days`, the parent has either fixed it via passthrough
+        # or the app is gone. No cap on this table; it's tiny by design.
+        res = s.exec(delete(TlsFailure).where(TlsFailure.ts_last < cutoff))
+        tls_deleted = res.rowcount or 0
+        s.commit()
+    return {
+        "age_deleted": age_deleted,
+        "cap_deleted": cap_deleted,
+        "tls_deleted": tls_deleted,
+    }
 
 
 def vacuum() -> None:
