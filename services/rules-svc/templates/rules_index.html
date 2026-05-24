@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% set nav = "rules" %}
+{% set title = "Rules library" %}
+{% block content %}
+
+<h1>Rules library</h1>
+
+<div class="panel">
+  <h2>Blocklists</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Description</th><th>Sources</th></tr></thead>
+    <tbody>
+    {% for name, b in cfg.blocklists.items() %}
+    <tr>
+      <td><code>{{ name }}</code></td>
+      <td>{{ b.description }}</td>
+      <td><small>{% for s in b.sources %}{{ s }}<br>{% endfor %}</small></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h2>App definitions</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Hosts</th><th>IP ranges</th></tr></thead>
+    <tbody>
+    {% for name, a in cfg.apps.items() %}
+    <tr>
+      <td><code>{{ name }}</code></td>
+      <td><small>{{ a.hosts | join(', ') }}</small></td>
+      <td><small>{{ a.ip_ranges | join(', ') or '—' }}</small></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<p class="muted">Edit <code>config/kids.yaml</code> directly to add new blocklists / apps. CRUD UI is a follow-up.</p>
+
+{% endblock %}

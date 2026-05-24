@@ -1,0 +1,125 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a22;
+  --panel-2: #1d2230;
+  --line: #262b3a;
+  --fg: #e6e8ee;
+  --muted: #8b93a6;
+  --accent: #4a9eff;
+  --danger: #ff5c5c;
+  --warn: #ffb84a;
+  --ok: #4ade80;
+  --radius: 8px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.muted { color: var(--muted); }
+code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; font-size: 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+pre { background: var(--panel-2); padding: 12px; border-radius: var(--radius); overflow-x: auto; font-size: 12px; }
+
+.topnav {
+  display: flex; align-items: center; gap: 18px;
+  padding: 12px 24px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.topnav .brand {
+  font-weight: 700; letter-spacing: 0.5px; color: var(--fg);
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.topnav .brand-logo { height: 24px; width: 24px; object-fit: contain; }
+.topnav a { color: var(--muted); font-size: 13px; }
+.topnav a.active, .topnav a:hover { color: var(--fg); }
+.topnav .spacer { flex: 1; }
+
+.container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+/* Truly edge-to-edge for the wide layout. Use !important so cached CSS
+ * or rule-order surprises can't shrink us back to 1100px. */
+main.container-wide {
+  max-width: 100% !important;
+  width: 100% !important;
+  margin: 0 !important;
+  padding: 12px 16px !important;
+  box-sizing: border-box !important;
+}
+main.container-wide .activity-wrap,
+main.container-wide .activity-table { width: 100% !important; }
+
+/* Activity table: dense, monospaced paths, no wrapping, the path column
+ * absorbs whatever width is left so wide screens get useful detail. */
+.activity-wrap { width: 100%; overflow-x: auto; }
+.activity-table { width: 100%; border-collapse: collapse; }
+.activity-table td, .activity-table th {
+  padding: 5px 8px; font-size: 12.5px;
+  white-space: nowrap;            /* never wrap a row */
+  overflow: hidden; text-overflow: ellipsis;
+}
+.activity-table th { white-space: nowrap; }
+.activity-table .path-cell { width: 100%; max-width: 0; }  /* greedy — eats remaining width */
+.activity-table .path-cell code { font-size: 11.5px; word-break: keep-all; }
+h1 { font-size: 22px; margin: 0 0 16px; }
+h2 { font-size: 16px; margin: 24px 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+.row { display: flex; gap: 16px; flex-wrap: wrap; }
+.row > * { flex: 1; min-width: 200px; }
+
+button, .btn, input[type=submit] {
+  background: var(--accent); color: white;
+  border: none; padding: 8px 14px; border-radius: 6px;
+  font-size: 13px; cursor: pointer; font-weight: 500;
+}
+button.secondary, .btn.secondary { background: var(--panel-2); color: var(--fg); }
+button.danger, .btn.danger { background: var(--danger); }
+button:hover { filter: brightness(1.1); }
+
+input[type=text], input[type=number], input[type=email], input[type=url], select, textarea {
+  background: var(--panel-2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px 10px; font-size: 13px; font-family: inherit;
+  width: 100%;
+}
+label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+.card h3 { margin: 0 0 8px; }
+.card .meta { font-size: 12px; color: var(--muted); }
+
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 16px 0 20px; }
+.tabs a {
+  padding: 8px 14px; color: var(--muted); border-bottom: 2px solid transparent;
+}
+.tabs a.active { color: var(--fg); border-bottom-color: var(--accent); }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+tr:hover td { background: var(--panel-2); }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+.badge.allow { background: rgba(74,222,128,0.15); color: var(--ok); }
+.badge.block { background: rgba(255,92,92,0.15); color: var(--danger); }
+.badge.flag  { background: rgba(255,184,74,0.15); color: var(--warn); }
+.badge.sni   { background: rgba(139,147,166,0.15); color: var(--muted); }
+.badge.online { background: rgba(74,222,128,0.15); color: var(--ok); }
+.badge.offline { background: rgba(139,147,166,0.15); color: var(--muted); }
+.badge.kind-page    { background: rgba(74,158,255,0.18); color: #87b8ff; }
+.badge.kind-iframe  { background: rgba(74,158,255,0.10); color: #87b8ff; }
+.badge.kind-xhr     { background: rgba(255,184,74,0.10); color: #e4a350; }
+.badge.kind-ws      { background: rgba(180,120,255,0.15); color: #c79cff; }
+.badge.kind-asset   { background: rgba(139,147,166,0.10); color: var(--muted); }
+.badge.kind-unknown { background: rgba(139,147,166,0.10); color: var(--muted); }
+
+.wizard-step { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; margin-bottom: 12px; }
+.wizard-step h3 { margin: 0 0 12px; }
+.qr-box { display: flex; justify-content: center; padding: 20px; background: white; border-radius: var(--radius); }
+.qr-box svg { width: 280px; height: 280px; }
+
+.kbd { background: var(--panel-2); padding: 2px 6px; border-radius: 3px; border: 1px solid var(--line); font-family: ui-monospace, monospace; font-size: 11px; }

@@ -1,0 +1,34 @@
+# Secrets / runtime state — never commit.
+.env
+.env.*
+!.env.example
+# Real policy file: contains kid names + WG public keys. The committed
+# template is config/kids.example.yaml; ./gdlf init copies it into place.
+config/kids.yaml
+config/wg/*
+!config/wg/.gitkeep
+config/adguard/*
+!config/adguard/.gitkeep
+config/mitmproxy/*
+!config/mitmproxy/.gitkeep
+config/state/
+config/nft-state/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor cruft
+.DS_Store
+*.bak
+*.swp
+*~
+.idea/
+.vscode/
+
+# Logs
+*.log

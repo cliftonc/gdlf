@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# gdlf — thin CLI wrapper around $COMPOSE for the family network stack.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+# Detect compose binary: prefer `docker compose` plugin, fall back to standalone.
+if docker compose version >/dev/null 2>&1; then
+  COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE="docker-compose"
+else
+  echo "neither 'docker compose' nor 'docker-compose' is available" >&2
+  exit 1
+fi
+
+if [[ ! -f .env ]]; then
+  if [[ -f .env.example ]]; then
+    echo "No .env found. Copying .env.example -> .env. Edit it before continuing."
+    cp .env.example .env
+  fi
+fi
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  init)
+    # First-run setup: copy the example policy into place + generate the
+    # mitmproxy CA. kids.yaml is gitignored; the example is committed.
+    if [[ ! -f config/kids.yaml ]]; then
+      if [[ -f config/kids.example.yaml ]]; then
+        cp config/kids.example.yaml config/kids.yaml
+        echo "created config/kids.yaml from kids.example.yaml"
+      else
+        echo "kids: []" > config/kids.yaml
+        echo "created empty config/kids.yaml (no example template found)"
+      fi
+    fi
+    mkdir -p config/state config/nft-state
+    echo "running ./scripts/gen-ca.sh (mitmproxy CA)..."
+    ./scripts/gen-ca.sh
+    echo "init done. Now: ./gdlf up"
+    ;;
+  up)        $COMPOSE up -d "$@" ;;
+  down)      $COMPOSE down "$@" ;;
+  restart)   $COMPOSE restart "$@" ;;
+  logs)      $COMPOSE logs -f --tail=200 "$@" ;;
+  ps)        $COMPOSE ps ;;
+  shell)
+    svc="${1:-rules-svc}"
+    $COMPOSE exec "$svc" /bin/sh
+    ;;
+  rebuild)
+    $COMPOSE build --no-cache "$@"
+    $COMPOSE up -d "$@"
+    ;;
+  help|-h|--help|"")
+    cat <<EOF
+gdlf — usage:
+  ./gdlf init               one-time setup (generate CA, create kids.yaml)
+  ./gdlf up                 start the stack
+  ./gdlf down               stop the stack
+  ./gdlf restart [svc]      restart everything (or one service)
+  ./gdlf logs [svc]         follow logs
+  ./gdlf ps                 service status
+  ./gdlf shell [svc]        shell into a container (default: rules-svc)
+  ./gdlf rebuild [svc]      $COMPOSE build --no-cache + up
+
+Dashboard: http://localhost:\${DASHBOARD_PORT:-8080}
+EOF
+    ;;
+  *)
+    # Pass-through to $COMPOSE for anything we didn't shadow.
+    $COMPOSE "$cmd" "$@"
+    ;;
+esac

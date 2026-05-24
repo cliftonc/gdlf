@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gdlf{% if title %} — {{ title }}{% endif %}</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="apple-touch-icon" href="/static/logo-256.png">
+<link rel="stylesheet" href="/static/app.css?v={{ css_v() }}">
+<script src="https://unpkg.com/htmx.org@2.0.3"></script>
+</head>
+<body>
+<nav class="topnav">
+  <a class="brand" href="/kids">
+    <img src="/static/logo-64.png" alt="" class="brand-logo"> gdlf
+  </a>
+  <a href="/kids" {% if nav == 'kids' %}class="active"{% endif %}>Kids</a>
+  <a href="/activity" {% if nav == 'activity' %}class="active"{% endif %}>Activity</a>
+  <a href="/rules" {% if nav == 'rules' %}class="active"{% endif %}>Rules</a>
+  <a href="/settings" {% if nav == 'settings' %}class="active"{% endif %}>Settings</a>
+  <span class="spacer"></span>
+  <span class="muted">{{ now.strftime('%H:%M UTC') }}</span>
+</nav>
+<main class="container {% if wide %}container-wide{% endif %}">
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

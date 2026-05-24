@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% set nav = "kids" %}
+{% set title = "Enrol " + device.name %}
+{% block content %}
+
+<h1>Enrolling {{ device.name }}</h1>
+<p class="muted">Kid: <a href="/kids/{{ kid.name }}">{{ kid.name }}</a> · IP: <code>{{ device.wg_ip }}</code> · Platform: {{ device.platform }}</p>
+
+<div class="wizard-step">
+  <h3>Step 1 — install WireGuard on the device</h3>
+  <p>
+    {% if device.platform == 'ios' %}
+      Install the <a href="https://apps.apple.com/app/wireguard/id1441195209">WireGuard app</a> from the App Store.
+    {% elif device.platform == 'android' %}
+      Install the <a href="https://play.google.com/store/apps/details?id=com.wireguard.android">WireGuard app</a> from Play Store.
+    {% elif device.platform == 'chromeos' %}
+      Install the WireGuard Android app from Play Store on the Chromebook.
+    {% else %}
+      Install WireGuard from <a href="https://www.wireguard.com/install/">wireguard.com/install</a>.
+    {% endif %}
+  </p>
+</div>
+
+<div class="wizard-step">
+  <h3>Step 2 — scan to add the tunnel</h3>
+  <p>In the WireGuard app, choose <em>Add tunnel → Create from QR code</em>, then scan:</p>
+  <div class="qr-box">
+    <img src="/devices/{{ device.wg_ip }}/qr" alt="QR for {{ device.name }}">
+  </div>
+  <p style="text-align:center;margin-top:12px;">
+    Or <a href="/devices/{{ device.wg_ip }}/conf">download the .conf file</a> and import it.
+  </p>
+  <p class="muted">Toggle the tunnel <em>on</em> after adding it. We'll detect when it connects.</p>
+
+  <div id="handshake-poll"
+       hx-get="/devices/{{ device.wg_ip }}/handshake"
+       hx-trigger="load, every 2s"
+       hx-swap="innerHTML">
+    <p class="muted">Waiting for first handshake…</p>
+  </div>
+</div>
+
+<div class="wizard-step" id="ca">
+  <h3>Step 3 — install the mitmproxy CA (optional, for URL-level rules)</h3>
+  <p>Without the CA, we can only block at the domain level (same as AdGuard) — URL-path rules won't fire on this device.</p>
+  <p>Scan this QR with the phone's camera to open the CA download page directly on the device:</p>
+  <div class="qr-box">
+    <img src="/ca/qr" alt="QR for CA download">
+  </div>
+  <p style="text-align:center;margin-top:8px;">
+    Or download directly: <a href="/ca.pem">/ca.pem</a>
+  </p>
+  <details>
+    <summary>iOS instructions</summary>
+    <ol>
+      <li>Open the downloaded <code>.pem</code> on the iOS device (e.g. AirDrop or email).</li>
+      <li>Settings → General → VPN &amp; Device Management → tap the profile → Install.</li>
+      <li>Settings → General → About → Certificate Trust Settings → toggle <em>mitmproxy</em> on.</li>
+    </ol>
+  </details>
+  <details>
+    <summary>Android instructions</summary>
+    <ol>
+      <li>Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate.</li>
+      <li>Select the downloaded <code>.pem</code>. Confirm the warning.</li>
+    </ol>
+  </details>
+  <details>
+    <summary>ChromeOS instructions</summary>
+    <ol>
+      <li>Settings → Security and privacy → Manage certificates → Authorities → Import.</li>
+      <li>Select the <code>.pem</code>, tick "Trust this certificate for identifying websites."</li>
+    </ol>
+  </details>
+  <form method="post" action="/devices/{{ device.wg_ip }}/mitm-installed" style="margin-top:12px;">
+    <button type="submit">I've installed the CA on this device</button>
+  </form>
+</div>
+
+<p><a href="/kids/{{ kid.name }}">← Back to {{ kid.name }}</a></p>
+
+{% endblock %}

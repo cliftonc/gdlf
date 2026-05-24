@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% set nav = "activity" %}
+{% set title = "Activity" %}
+{% set wide = true %}
+{% block content %}
+
+<div style="display:flex;align-items:baseline;gap:16px;">
+  <h1 style="margin:0;flex:1;">Activity</h1>
+  <button id="pause-btn" class="secondary" onclick="gdlfTogglePause()">⏸ pause</button>
+  <span class="muted" id="autoflag">live · every 3s</span>
+</div>
+<script>
+  window.gdlfRefresh = true;
+  function gdlfTogglePause() {
+    window.gdlfRefresh = !window.gdlfRefresh;
+    document.getElementById('pause-btn').textContent = window.gdlfRefresh ? '⏸ pause' : '▶ resume';
+    document.getElementById('autoflag').textContent =
+      window.gdlfRefresh ? 'live · every 3s' : 'paused';
+  }
+</script>
+
+<form method="get" style="display:flex;gap:8px;align-items:end;margin:12px 0 16px;">
+  <div style="min-width:160px;">
+    <label>Kid</label>
+    <select name="kid">
+      <option value="">all</option>
+      {% for k in cfg.kids %}
+      <option value="{{ k.name }}" {% if filter_kid == k.name %}selected{% endif %}>{{ k.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div style="min-width:140px;">
+    <label>Decision</label>
+    <select name="decision">
+      <option value="">all</option>
+      {% for d in ['allow', 'block', 'flag', 'sni_only', 'dns_block'] %}
+      <option value="{{ d }}" {% if filter_decision == d %}selected{% endif %}>{{ d }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px;cursor:pointer;">
+    <input type="checkbox" name="assets" value="1" {% if include_assets %}checked{% endif %} style="width:auto;">
+    <span class="muted">Include sub-resources (img / css / js / xhr)</span>
+  </label>
+  <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px;cursor:pointer;">
+    <input type="checkbox" name="sni" value="1" {% if include_sni %}checked{% endif %} style="width:auto;">
+    <span class="muted">Include SNI-only</span>
+  </label>
+  <button>Filter</button>
+</form>
+
+<div class="activity-wrap">
+<table class="activity-table">
+  <thead><tr>
+    <th>Time</th>
+    <th>Kid</th>
+    <th>Device</th>
+    <th>Decision</th>
+    <th>Kind</th>
+    <th>Host</th>
+    <th class="path-cell">Path</th>
+    <th>Rule</th>
+    <th></th>
+  </tr></thead>
+  {% set qs = [] %}
+  {% if filter_kid %}{% set _ = qs.append('kid=' ~ filter_kid) %}{% endif %}
+  {% if filter_decision %}{% set _ = qs.append('decision=' ~ filter_decision) %}{% endif %}
+  {% if include_sni %}{% set _ = qs.append('sni=1') %}{% endif %}
+  {% if include_assets %}{% set _ = qs.append('assets=1') %}{% endif %}
+  <tbody id="rows"
+         hx-get="/activity/rows{% if qs %}?{{ qs | join('&') }}{% endif %}"
+         hx-trigger="every 3s [window.gdlfRefresh]"
+         hx-swap="innerHTML">
+    {% include "_activity_rows.html" %}
+  </tbody>
+</table>
+</div>
+
+{% endblock %}

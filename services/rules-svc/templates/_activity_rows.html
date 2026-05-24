@@ -1,0 +1,31 @@
+{% for e in events %}
+<tr>
+  <td class="muted nowrap">{{ e.ts.strftime('%H:%M:%S') }}</td>
+  <td class="nowrap">{% if e.kid %}<a href="/kids/{{ e.kid }}">{{ e.kid }}</a>{% else %}?{% endif %}</td>
+  <td class="nowrap">
+    {% if e.kid and e.client_ip %}
+      <a href="/kids/{{ e.kid }}/devices/{{ e.client_ip }}/enrol"
+         title="Enrolment / re-issue / install CA">{{ e.device or e.client_ip }}</a>
+    {% else %}
+      {{ e.device or e.client_ip }}
+    {% endif %}
+  </td>
+  <td><span class="badge {{ e.decision if e.decision in ['allow','block','flag'] else 'sni' }}">{{ e.decision }}</span></td>
+  <td class="nowrap"><span class="badge kind-{{ e.kind or 'unknown' }}">{{ e.kind or '—' }}</span></td>
+  <td class="nowrap" title="{{ e.host }}">
+    {{ e.host }}
+    {% if e.sni_only %}<span class="badge sni">SNI</span>{% endif %}
+  </td>
+  {% set pq = (e.path or '') + ('?' + e.query if e.query else '') %}
+  <td class="path-cell" title="{{ pq }}"><code>{{ pq | truncate(80, true, '…') }}</code></td>
+  <td class="nowrap">{% if e.rule %}<code>{{ e.rule | truncate(40, true, '…') }}</code>{% endif %}</td>
+  <td class="nowrap">
+    {% if e.kid and e.host %}
+      <a class="badge sni" title="Create a matching rule for {{ e.kid }}"
+         href="/kids/{{ e.kid }}/rules/new?host={{ e.host | urlencode }}{% if e.path %}&path={{ e.path | urlencode }}{% endif %}{% if e.query %}&query={{ e.query | urlencode }}{% endif %}">+ rule</a>
+    {% endif %}
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="9" class="muted">No events yet.</td></tr>
+{% endfor %}

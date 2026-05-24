@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% set nav = "kids" %}
+{% set title = "Add device" %}
+{% block content %}
+
+<h1>Add device for {{ kid.name }}</h1>
+<p class="muted">Step 1 of 3 — name + platform.</p>
+
+<form method="post" action="/kids/{{ kid.name }}/devices/new" class="panel" style="max-width:480px;">
+  <label>Device name (e.g. "alice-iphone")</label>
+  <input type="text" name="device_name" required autofocus>
+
+  <label>Platform</label>
+  <select name="platform" required>
+    <option value="ios">iOS (iPhone / iPad)</option>
+    <option value="android">Android</option>
+    <option value="chromeos">ChromeOS</option>
+    <option value="macos">macOS</option>
+    <option value="windows">Windows</option>
+    <option value="linux">Linux</option>
+    <option value="other">Other</option>
+  </select>
+
+  <div style="margin-top:20px;display:flex;gap:8px;justify-content:flex-end;">
+    <a href="/kids/{{ kid.name }}" class="btn secondary">Cancel</a>
+    <button type="submit">Generate WireGuard config</button>
+  </div>
+</form>
+
+{% endblock %}

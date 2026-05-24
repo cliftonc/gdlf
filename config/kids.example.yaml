@@ -1,0 +1,52 @@
+# gdlf kids policy — example template.
+#
+# `./gdlf init` copies this to config/kids.yaml on first run if the real
+# file is missing. config/kids.yaml is gitignored (it contains real names
+# + WG public keys); this file is the safe-to-commit version.
+#
+# Schema lives in services/rules-svc/src/gdlf/schema.py. The dashboard
+# can read/write this file directly — UI edits and hand edits cooperate.
+
+kids:
+  # Example kid. Delete or replace via the dashboard.
+  - name: example-kid
+    age: 12
+    devices: []                  # populated by the device-enrolment wizard
+    schedule:
+      weekday: { allowed: "07:00-21:00" }
+      weekend: { allowed: "08:00-22:00" }
+    blocklists: [adult, gambling]   # references entries below
+    blocked_apps: []                # references entries below
+    url_rules:
+      # Examples — first match wins.
+      # - { action: block, match: "youtube.com/shorts/*" }
+      # - { action: block, match: "*/search", query: "q=.*\\bweed\\b.*", flag: true }
+      # - { action: allow, match: "youtube.com/@KhanAcademy/*" }
+    keyword_flags: []
+
+# Reusable category blocklists. Referenced by name from kids[].blocklists.
+# Managed via AdGuard's UI for now; this section is a record/intent.
+blocklists:
+  adult:
+    description: "Adult / NSFW content"
+    sources:
+      - https://big.oisd.nl/
+  gambling:
+    description: "Gambling sites"
+    sources:
+      - https://blocklistproject.github.io/Lists/gambling.txt
+  social-media-aggressive:
+    description: "Heavy social-media block (TikTok / Snap / IG)"
+    sources:
+      - https://blocklistproject.github.io/Lists/tiktok.txt
+      - https://blocklistproject.github.io/Lists/everything.txt
+
+# Reusable app definitions — hosts (and optional IP ranges) per name.
+# Referenced by kids[].blocked_apps.
+apps:
+  tiktok:
+    hosts: [tiktok.com, tiktokcdn.com, tiktokv.com, byteoversea.com, musical.ly]
+    ip_ranges: []
+  discord:
+    hosts: [discord.com, discord.gg, discordapp.com, discordapp.net]
+    ip_ranges: []

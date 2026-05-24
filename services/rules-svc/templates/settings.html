@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% set nav = "settings" %}
+{% set title = "Settings" %}
+{% block content %}
+
+<h1>Settings</h1>
+
+<div class="panel">
+  <h2>mitmproxy CA</h2>
+  {% if ca_present %}
+    <p>CA cert is present at <code>/etc/gdlf/mitmproxy/mitmproxy-ca-cert.pem</code>.</p>
+    <a class="btn" href="/ca.pem">Download CA cert (.pem)</a>
+  {% else %}
+    <p class="muted">CA cert not found. Run <code>./gdlf init</code> on the host to generate it.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>Alert webhook</h2>
+  <p>Configured via env var <code>ALERT_WEBHOOK_URL</code>.</p>
+</div>
+
+<div class="panel">
+  <h2>Email digest</h2>
+  <p>Configured via <code>SMTP_*</code> env vars (host, port, user, pass, from, to).</p>
+</div>
+
+<div class="panel">
+  <h2>Activity storage</h2>
+  <p>
+    <strong>{{ "{:,}".format(db_stats.events) }}</strong> events ·
+    <strong>{{ "{:.1f}".format(db_stats.db_bytes / 1024 / 1024) }} MB</strong>
+    on disk at <code>{{ db_stats.db_path }}</code>
+  </p>
+  {% if db_stats.oldest %}
+    <p class="muted">Oldest: {{ db_stats.oldest }} · Newest: {{ db_stats.newest }}</p>
+  {% endif %}
+  <p class="muted">
+    Retention: keep events for <code>{{ retention_days }}</code> days, cap at
+    <code>{{ "{:,}".format(max_events) }}</code> rows (whichever bites first).
+    Tune via <code>RETENTION_DAYS</code> / <code>MAX_EVENTS</code> env vars.
+    Prune runs hourly; VACUUM daily.
+  </p>
+  <form method="post" action="/settings/prune-now" style="display:inline;">
+    <button class="secondary">Prune + VACUUM now</button>
+  </form>
+</div>
+
+{% endblock %}
