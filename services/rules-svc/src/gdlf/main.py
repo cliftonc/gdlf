@@ -30,6 +30,7 @@ from . import (
     adguard,
     alerts,
     api_activity,
+    api_android_mdm,
     api_auth,
     api_devices,
     api_kids,
@@ -44,6 +45,7 @@ from . import (
     store,
     wg,
 )
+from .amapi import orchestrator as amapi_orchestrator
 from .rules import evaluate
 from .settings import settings
 
@@ -60,11 +62,48 @@ async def lifespan(app: FastAPI):
     store.bind_event_loop(asyncio.get_running_loop())
     sync_task = asyncio.create_task(adguard.sync_loop())
     prune_task = asyncio.create_task(_prune_loop())
+    amapi_task = asyncio.create_task(amapi_orchestrator.status_sync_loop())
+    amapi_watch_task = asyncio.create_task(_amapi_policy_watch_loop())
     try:
         yield
     finally:
         sync_task.cancel()
         prune_task.cancel()
+        amapi_task.cancel()
+        amapi_watch_task.cancel()
+
+
+async def _amapi_policy_watch_loop():
+    """Debounced kids.yaml -> AMAPI policy sync.
+
+    Waits for `store.mutation_event()`, then sleeps a short cool-down so a
+    burst of saves (e.g. parent toggling several rules quickly) collapses
+    into one round of `enterprises.policies.patch` calls. No-op while AMAPI
+    isn't configured.
+    """
+    from .amapi import client as _amapi_client
+    import logging
+    log = logging.getLogger("gdlf.amapi.watch")
+    event = store.mutation_event()
+    while True:
+        try:
+            await event.wait()
+            event.clear()
+            # Debounce ~2s; if more saves arrive in that window we'll still
+            # only run sync_all_policies once.
+            await asyncio.sleep(2.0)
+            event.clear()
+            if not _amapi_client.is_configured():
+                continue
+            res = await asyncio.to_thread(amapi_orchestrator.sync_all_policies)
+            if res["ok"] or res["errors"]:
+                log.info("amapi policy resync: ok=%d errors=%d",
+                         len(res["ok"]), len(res["errors"]))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("amapi policy watch failed: %s", e)
+            await asyncio.sleep(5.0)
 
 
 async def _prune_loop():
@@ -98,6 +137,7 @@ app.include_router(api_activity.router)
 app.include_router(api_settings.router)
 app.include_router(api_tls_failures.router)
 app.include_router(api_mdm.router)
+app.include_router(api_android_mdm.router)
 
 # Where the multi-stage Dockerfile lands the built SPA. The dev server
 # (`./gdlf web-dev`) runs Vite separately and proxies /api back to here, so
@@ -132,7 +172,11 @@ _PUBLIC_FILES = {"/favicon.png", "/logo-64.png", "/logo-256.png", "/gandalf.png"
 def _is_public(path: str) -> bool:
     if path in _PUBLIC_PATHS or path in _PUBLIC_API_PATHS or path in _PUBLIC_FILES:
         return True
-    if path.startswith("/devices/") and (path.endswith("/conf") or path.endswith("/qr")):
+    if path.startswith("/devices/") and (
+        path.endswith("/conf")
+        or path.endswith("/qr")
+        or path.endswith("/android-mdm/qr.png")
+    ):
         return True
     # MDM endpoints: device-presented at TLS layer (mTLS verified by Caddy),
     # never reached by a browser; bypass the cookie auth.

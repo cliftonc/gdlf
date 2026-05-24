@@ -332,6 +332,51 @@ export function useMdmEnqueueCommand(kidName: string) {
   });
 }
 
+// --- Android MDM (AMAPI) mutations ----------------------------------------
+
+export function useAndroidMdmEnrollToken(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api<{ token_name: string; qr_url: string; expires_at: string | null }>(
+        `/api/devices/${encodeURIComponent(ip)}/android-mdm/enroll-token`,
+        { method: "POST" }
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(kidName) }),
+  });
+}
+
+export function useAndroidMdmSyncPolicy(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api(`/api/devices/${encodeURIComponent(ip)}/android-mdm/sync-policy`, {
+        method: "POST",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(kidName) }),
+  });
+}
+
+export function useAndroidMdmSyncStatus(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api(`/api/devices/${encodeURIComponent(ip)}/android-mdm/sync-status`, {
+        method: "POST",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(kidName) }),
+  });
+}
+
+export function useAndroidMdmUnenroll(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api(`/api/devices/${encodeURIComponent(ip)}/android-mdm`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(kidName) }),
+  });
+}
+
 export function usePruneNow() {
   const qc = useQueryClient();
   return useMutation({

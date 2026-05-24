@@ -26,6 +26,19 @@ export const MdmStateSchema = z.object({
 });
 export type MdmState = z.infer<typeof MdmStateSchema>;
 
+export const AndroidMdmStatusEnum = z.enum(["pending", "active", "disabled", "deleted"]);
+export type AndroidMdmStatus = z.infer<typeof AndroidMdmStatusEnum>;
+
+export const AndroidMdmStateSchema = z.object({
+  status: AndroidMdmStatusEnum,
+  model: z.string().nullable(),
+  enrolled_at: z.string().nullable(),
+  last_status_at: z.string().nullable(),
+  applied_policy_version: z.string().nullable(),
+  device_name: z.string().nullable(),
+});
+export type AndroidMdmState = z.infer<typeof AndroidMdmStateSchema>;
+
 export const DeviceSchema = z.object({
   name: z.string(),
   platform: PlatformEnum,
@@ -40,6 +53,7 @@ export const DeviceSchema = z.object({
   // .nullish() accepts both null and undefined, so a stale cached JSON
   // payload (pre-Phase-5 backend) doesn't break the dashboard.
   mdm: MdmStateSchema.nullish(),
+  android_mdm: AndroidMdmStateSchema.nullish(),
 });
 export type Device = z.infer<typeof DeviceSchema>;
 

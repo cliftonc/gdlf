@@ -93,6 +93,7 @@ config/
   state/                    # rules-svc SQLite + key material
     apns/                   # Apple Push cert (push.pem) + helpers (`./gdlf apns`)
     mdm-ca/                 # signing CA for per-device MDM identity certs
+    amapi/                  # Android Management API: GCP creds + enterprise.json
     caddy/                  # Caddy ACME + state (Let's Encrypt cert)
 nftables/                   # firewall sidecar (Alpine + nft + Python)
 scripts/
@@ -120,6 +121,9 @@ Each subdirectory has its own `CLAUDE.md` with the specifics.
 # MDM (Apple iOS, optional — see services/rules-svc/CLAUDE.md and services/proxy/CLAUDE.md):
 ./gdlf apns ...    # APNs MDM Push Cert workflow (csr → submit → decrypt)
 ./gdlf mdm-ca ...  # gdlf MDM signing CA (issues per-device identity certs)
+
+# MDM (Android via Android Management API, optional — see services/rules-svc/CLAUDE.md):
+./gdlf amapi ...   # AMAPI setup: GCP service-account + EMM enterprise signup
 ```
 
 `./gdlf up` automatically enables the `mdm` compose profile (which adds the
@@ -147,10 +151,11 @@ standalone `docker-compose` binary.
   set Private DNS to `dns.google`. We could `nft drop` :853 outbound to
   force fallback, but the parent's threat model here is guardrail not
   containment. **EXCEPT** for iOS devices enrolled in MDM (see
-  `services/rules-svc/CLAUDE.md` § MDM): for those, the WireGuard tunnel
-  is always-on and non-removable, the CA is system-trusted, and adding
-  another VPN / profile is restricted at the OS level — so the guardrail
-  becomes containment for that platform.
+  `services/rules-svc/CLAUDE.md` § MDM) and Android devices enrolled via
+  AMAPI as Device Owner: for those, the WireGuard tunnel is always-on
+  and non-removable, the CA is system-trusted, and adding another VPN /
+  profile is restricted at the OS level — so the guardrail becomes
+  containment for those platforms.
 * **QUIC (UDP/443) is blocked for `mitm_clients`** so browsers fall back
   to TCP/TLS and mitmproxy can actually see traffic. Devices without the
   CA still get QUIC; we just can't inspect them beyond DNS / SNI.

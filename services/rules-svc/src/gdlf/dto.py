@@ -27,6 +27,7 @@ def device_dto(d: Device, handshake: dict | None = None) -> dict[str, Any]:
         "tx": (handshake or {}).get("tx", 0),
         "online": _is_online(last),
         "mdm": mdm_state_dto(d.mdm) if d.mdm else None,
+        "android_mdm": android_mdm_state_dto(d.android_mdm) if d.android_mdm else None,
     }
 
 
@@ -38,6 +39,18 @@ def mdm_state_dto(s) -> dict[str, Any]:
         "supervised": s.supervised,
         "enrolled_at": s.enrolled_at.isoformat() if s.enrolled_at else None,
         "last_checkin_at": s.last_checkin_at.isoformat() if s.last_checkin_at else None,
+    }
+
+
+def android_mdm_state_dto(s) -> dict[str, Any]:
+    """Projection of AndroidMdmState for the dashboard."""
+    return {
+        "status": s.status,
+        "model": s.model,
+        "enrolled_at": s.enrolled_at.isoformat() if s.enrolled_at else None,
+        "last_status_at": s.last_status_at.isoformat() if s.last_status_at else None,
+        "applied_policy_version": s.applied_policy_version,
+        "device_name": s.device_name,
     }
 
 

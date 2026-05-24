@@ -42,6 +42,37 @@ class MdmState(BaseModel):
     last_checkin_at: datetime | None = None
 
 
+AndroidMdmStatus = Literal["pending", "active", "disabled", "deleted"]
+
+
+class AndroidMdmState(BaseModel):
+    """Per-device Android Management API (AMAPI) enrolment state.
+
+    Unlike Apple MDM, devices talk to Google directly — we only call AMAPI
+    on the side. So this state is mostly a record of names + status mirrored
+    from Google's view of the device:
+
+      * `enrollment_token_name` — `enterprises/{N}/enrollmentTokens/{id}`
+        from `enterprises.enrollmentTokens.create`, before the device enrols.
+      * `policy_name`           — `enterprises/{N}/policies/{kid_device}`,
+        rebuilt + patched whenever kids.yaml changes.
+      * `device_name`           — `enterprises/{N}/devices/{id}` once Google
+        notifies us (we discover via the periodic devices.list/get poll).
+      * `status`                — Google's `Device.state`, lowercased.
+      * `applied_policy_version`— `Device.appliedPolicyVersion`; used to
+        confirm a policy update has propagated.
+    """
+    model_config = ConfigDict(extra="forbid")
+    enrollment_token_name: str | None = None
+    policy_name: str
+    device_name: str | None = None
+    status: AndroidMdmStatus = "pending"
+    model: str | None = None
+    enrolled_at: datetime | None = None
+    last_status_at: datetime | None = None
+    applied_policy_version: str | None = None
+
+
 class Device(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -54,6 +85,8 @@ class Device(BaseModel):
     manual_block: bool = False
     # Optional MDM enrolment state (Apple supervised devices only, currently).
     mdm: MdmState | None = None
+    # Optional Android Management API enrolment state.
+    android_mdm: AndroidMdmState | None = None
 
 
 class ScheduleWindow(BaseModel):

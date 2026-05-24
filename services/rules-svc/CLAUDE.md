@@ -190,6 +190,100 @@ everything else.
 * **mTLS cert in the X-Mdm-Client-Cert-B64 header is base64-DER**, not
   PEM — PEM has newlines which aren't legal in HTTP header values.
 
+## MDM (Android, Android Management API)
+
+The Android equivalent of Apple MDM, deliberately separate code because the
+protocols share nothing. Structurally much smaller than the iOS stack because
+Google hosts the DPC (`Android Device Policy`), provides push, and acts as
+the device-to-cloud TLS terminator — rules-svc only calls the AMAPI REST API.
+
+### How a device gets enrolled
+
+1. **Setup (one time per appliance)**:
+   * `./gdlf amapi init` — prints GCP setup steps (create project, enable
+     Android Management API, download service-account JSON to
+     `config/state/amapi/service-account.json`).
+   * `./gdlf amapi enterprise signup <callback_url>` — calls
+     `signupUrls.create`, returns a URL the parent visits to bind an
+     Enterprise to their Google account.
+   * `./gdlf amapi enterprise complete <enterpriseToken> <signupUrlName>`
+     — finalises and writes `config/state/amapi/enterprise.json`.
+
+2. **Per-device enrolment**: dashboard `POST /api/devices/{ip}/android-mdm/enroll-token`
+   builds the per-device Policy (force-installed WireGuard with managed
+   config carrying the `.conf`, `alwaysOnVpnPackage` with `lockdownEnabled`,
+   `caCerts` carrying the mitmproxy CA, plus restrictions), patches it via
+   `enterprises.policies.patch`, then mints an enrollment token bound to
+   that policy. Returns a QR PNG URL the dashboard renders.
+
+3. **Provisioning**: parent factory-resets the phone, taps the welcome
+   screen six times to open the QR scanner, scans `/devices/{ip}/android-mdm/qr.png`.
+   Android downloads `Android Device Policy`, enrols as Device Owner, applies
+   the Policy. The factory reset is unavoidable — Device Owner mode can only
+   be set during initial provisioning.
+
+4. **Steady state**: the background `amapi.orchestrator.status_sync_loop`
+   polls `enterprises.devices.list` every 60s. The device is matched back to
+   a kids.yaml row via `additionalData` (we stuff `{wg_ip, kid, device}`
+   into it at token mint), and `AndroidMdmState.{status, model,
+   applied_policy_version, last_status_at}` is mirrored from Google's view.
+
+5. **Policy updates**: any `store.mutate()` fires the `mutation_event`,
+   which a debounced `_amapi_policy_watch_loop` in `main.py` picks up and
+   triggers `sync_all_policies()`. AMAPI propagates new policy to devices
+   within a few minutes (or instantly if the device polls).
+
+### Module map (`amapi/`)
+
+| File              | Responsibility                                                              |
+| ----------------- | --------------------------------------------------------------------------- |
+| `client.py`       | Lazy googleapiclient + state-file readers (service-account, enterprise).    |
+| `enterprise.py`   | `signupUrls.create` + `enterprises.create` for the one-time signup.         |
+| `policy.py`       | `build_policy(kid, device) -> dict` — the JSON we patch into AMAPI.         |
+| `enrollment.py`   | `mint(policy_name=...)` — wraps `enrollmentTokens.create`.                  |
+| `orchestrator.py` | sync_policy / sync_device_status / 60s background loop.                     |
+
+### What's NOT in the Android path (vs iOS)
+
+Don't go looking for these — they don't exist on the Android side:
+
+* No identity certs / MDM signing CA — devices authenticate to Google, not us.
+* No Caddy mTLS terminator — there's no inbound device traffic.
+* No APNs / push cert — Google's DPC handles push.
+* No command queue or response tables — policy is declarative; AMAPI
+  reconciles.
+* No `/mdm/checkin` / `/mdm/server` equivalents — outbound calls only.
+
+### State files
+
+* `config/state/amapi/service-account.json` — GCP service-account key.
+  Treat as a long-lived credential (0600). Rotating it means downloading
+  a new key from GCP and dropping it into the same path.
+* `config/state/amapi/enterprise.json` — `{name, project_id,
+  signup_url_name, display_name}`. Written by `./gdlf amapi enterprise
+  complete`. Recreating it requires going through signup again, which is
+  fine — devices stay enrolled to the same `enterprises/...` resource.
+
+### Gotchas
+
+* **WireGuard for Android managed config** — the load-bearing key is
+  `config` (the full .conf as a string). The DPC injects it at the moment
+  WG installs, so the kid sees no "import tunnel" prompt.
+* **Factory reset is unavoidable** — Device Owner mode requires fresh
+  provisioning. Devices already in use need to be wiped (same constraint
+  as the Apple Configurator flow for iOS).
+* **CA trust goes via `openNetworkConfiguration`**, not a top-level
+  `caCerts` field. AMAPI's public Policy schema has no `caCerts` —
+  certificate authority install is done via Chromium's Open Network
+  Configuration (ONC) embedded under `openNetworkConfiguration`, with
+  `Certificates[].Type="Authority"` + `TrustBits=["Web"]` to mark the
+  cert as system-trusted for TLS. `policy.build_policy()` constructs
+  this; `_load_ca_b64()` returns the base64-DER bytes that go in the
+  `X509` field.
+* **Status poll is the only way we discover enrolment** — the device
+  doesn't tell us when it's done; it tells Google. We learn via the next
+  60s poll, so freshly-enrolled devices show "pending" for up to a minute.
+
 ## Adding a new page
 
 1. New file under `web/src/routes/` (e.g. `web/src/routes/foo.tsx`). Export

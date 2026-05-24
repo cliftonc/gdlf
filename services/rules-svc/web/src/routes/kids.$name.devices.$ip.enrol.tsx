@@ -14,7 +14,11 @@ import {
   Switch,
 } from "@heroui/react";
 import { useEnrolment, useHandshake } from "../lib/queries";
-import { useMarkMitmInstalled, useMdmEnrollToken } from "../lib/mutations";
+import {
+  useAndroidMdmEnrollToken,
+  useMarkMitmInstalled,
+  useMdmEnrollToken,
+} from "../lib/mutations";
 
 export const Route = createFileRoute("/kids/$name/devices/$ip/enrol")({
   component: DeviceEnrolPage,
@@ -123,6 +127,115 @@ function MdmEnrolCard({
   );
 }
 
+/** Android equivalent of MdmEnrolCard. The factory-reset → tap-6× → scan-QR
+ *  flow is the only way to provision a device as AMAPI Device Owner, but
+ *  once done, every Step 1/3 below is redundant — the policy installs WG
+ *  + the CA + lockdown restrictions automatically. */
+function AndroidMdmEnrolCard({
+  kidName,
+  ip,
+  status,
+}: {
+  kidName: string;
+  ip: string;
+  status: "pending" | "active" | "disabled" | "deleted" | null;
+}) {
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const enroll = useAndroidMdmEnrollToken(kidName);
+
+  const onGenerate = async () => {
+    const r = await enroll.mutateAsync(ip);
+    setQrUrl(`${r.qr_url}?t=${Date.now()}`);
+  };
+
+  const alreadyActive = status === "active";
+
+  return (
+    <Card className="border border-primary-200 bg-primary-50/30">
+      <CardHeader className="flex flex-col items-start gap-1">
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-semibold">Recommended · Android Management API</p>
+          {alreadyActive ? (
+            <Chip size="sm" color="success" variant="flat">
+              active
+            </Chip>
+          ) : status === "pending" ? (
+            <Chip size="sm" color="warning" variant="flat">
+              pending
+            </Chip>
+          ) : (
+            <Chip size="sm" color="primary" variant="flat">
+              one-shot setup
+            </Chip>
+          )}
+        </div>
+        <p className="text-xs text-default-500">
+          Provisions as Device Owner: force-installs WireGuard with the
+          tunnel pre-configured, pins it as always-on with lockdown, installs
+          the inspection CA as system-trusted, and blocks bypass paths.
+          Replaces Steps 1 + 3 below.
+        </p>
+      </CardHeader>
+      <CardBody className="flex flex-col gap-3">
+        {alreadyActive ? (
+          <p className="text-sm text-success">
+            This device is already AMAPI-enrolled. Use the MDM dialog on the kid page to
+            re-push policy, refresh status, or unenroll.
+          </p>
+        ) : (
+          <>
+            <ol className="list-decimal pl-5 text-sm space-y-1 text-default-700">
+              <li>
+                Factory-reset the phone (Settings → System → Reset, or skip if it's fresh).
+              </li>
+              <li>
+                On the welcome screen, <strong>tap six times in the same spot</strong> —
+                the QR scanner opens.
+              </li>
+              <li>Scan the QR. The phone provisions automatically (~2 min).</li>
+            </ol>
+            {qrUrl ? (
+              <div className="flex flex-col sm:flex-row items-start gap-4">
+                <div className="bg-white p-3 rounded-medium shrink-0">
+                  <img
+                    src={qrUrl}
+                    alt="Android enrollment QR"
+                    className="w-64 h-64"
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Button
+                    size="sm"
+                    variant="flat"
+                    onPress={onGenerate}
+                    isLoading={enroll.isPending}
+                  >
+                    Regenerate
+                  </Button>
+                  <p className="text-xs text-warning">
+                    Single-use, valid for 1 hour. Generate a new one if setup fails partway.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <Button
+                  size="sm"
+                  color="primary"
+                  onPress={onGenerate}
+                  isLoading={enroll.isPending}
+                >
+                  Generate enrolment QR
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
 function DeviceEnrolPage() {
   const { name, ip } = Route.useParams();
   const enrol = useEnrolment(name, ip);
@@ -159,6 +272,14 @@ function DeviceEnrolPage() {
 
       {e.device.platform === "ios" && (
         <MdmEnrolCard kidName={name} ip={ip} mdmStatus={e.device.mdm?.status ?? null} />
+      )}
+
+      {e.device.platform === "android" && (
+        <AndroidMdmEnrolCard
+          kidName={name}
+          ip={ip}
+          status={e.device.android_mdm?.status ?? null}
+        />
       )}
 
       <Card>

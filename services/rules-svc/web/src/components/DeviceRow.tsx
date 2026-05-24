@@ -12,6 +12,12 @@ function mdmChipColor(status: MdmStatus): "success" | "warning" | "danger" {
   return "danger"; // checked_out
 }
 
+function androidMdmChipColor(status: string): "success" | "warning" | "danger" {
+  if (status === "active") return "success";
+  if (status === "pending") return "warning";
+  return "danger"; // disabled / deleted
+}
+
 function formatAgo(ts: number): string {
   if (!ts) return "never";
   const sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
@@ -99,6 +105,15 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
               MDM: {device.mdm.status}
             </Chip>
           )}
+          {device.android_mdm && (
+            <Chip
+              size="sm"
+              color={androidMdmChipColor(device.android_mdm.status)}
+              variant="flat"
+            >
+              MDM: {device.android_mdm.status}
+            </Chip>
+          )}
         </div>
         <p className="text-xs text-default-500 mt-1 font-mono">
           {device.wg_ip} · last handshake {formatAgo(device.last_handshake)} ·{" "}
@@ -127,6 +142,16 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
             size="sm"
             variant="flat"
             color={device.mdm?.status === "enrolled" ? "success" : "default"}
+            onPress={() => setMdmOpen(true)}
+          >
+            MDM
+          </Button>
+        )}
+        {device.platform === "android" && (
+          <Button
+            size="sm"
+            variant="flat"
+            color={device.android_mdm?.status === "active" ? "success" : "default"}
             onPress={() => setMdmOpen(true)}
           >
             MDM

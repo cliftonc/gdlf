@@ -34,7 +34,8 @@ RUN pip install --upgrade pip \
       "python-multipart>=0.0.12" "pydantic>=2.9" "ruamel.yaml>=0.18" \
       "sqlmodel>=0.0.22" "apscheduler>=3.10" "httpx[http2]>=0.28" \
       "filelock>=3.16" "watchfiles>=0.24" "qrcode[pil]>=8.0" "cryptography>=43.0" \
-      "sse-starlette>=2.1" "tldextract>=5.1"
+      "sse-starlette>=2.1" "tldextract>=5.1" \
+      "google-api-python-client>=2.150" "google-auth>=2.35"
 
 COPY src ./src
 COPY --from=web /web/dist ./web

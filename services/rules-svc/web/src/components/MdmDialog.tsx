@@ -14,6 +14,10 @@ import {
 import type { Device } from "../lib/schemas";
 import { useMdmCommands } from "../lib/queries";
 import {
+  useAndroidMdmEnrollToken,
+  useAndroidMdmSyncPolicy,
+  useAndroidMdmSyncStatus,
+  useAndroidMdmUnenroll,
   useMdmEnqueueCommand,
   useMdmEnrollToken,
   useMdmInstallPolicy,
@@ -32,9 +36,17 @@ function formatAgo(iso: string | null): string {
 }
 
 function statusColor(s: string): "success" | "warning" | "danger" | "default" {
-  if (s === "acknowledged" || s === "Acknowledged" || s === "enrolled") return "success";
+  if (s === "acknowledged" || s === "Acknowledged" || s === "enrolled" || s === "active")
+    return "success";
   if (s === "pending" || s === "sent" || s === "NotNow") return "warning";
-  if (s === "error" || s === "Error" || s === "CommandFormatError" || s === "checked_out")
+  if (
+    s === "error" ||
+    s === "Error" ||
+    s === "CommandFormatError" ||
+    s === "checked_out" ||
+    s === "disabled" ||
+    s === "deleted"
+  )
     return "danger";
   return "default";
 }
@@ -50,18 +62,32 @@ export function MdmDialog({
   isOpen: boolean;
   onClose: () => void;
 }) {
+  const isAndroid = device.platform === "android";
   const enrolled = device.mdm?.status === "enrolled";
-  const commands = useMdmCommands(device.wg_ip, isOpen && enrolled);
+  const commands = useMdmCommands(device.wg_ip, isOpen && enrolled && !isAndroid);
   const enrollToken = useMdmEnrollToken(kidName);
   const installPolicy = useMdmInstallPolicy(kidName);
   const push = useMdmPush(kidName);
   const enqueue = useMdmEnqueueCommand(kidName);
 
+  // Android Management API mutations.
+  const aEnroll = useAndroidMdmEnrollToken(kidName);
+  const aSyncPolicy = useAndroidMdmSyncPolicy(kidName);
+  const aSyncStatus = useAndroidMdmSyncStatus(kidName);
+  const aUnenroll = useAndroidMdmUnenroll(kidName);
+
   const [enrollUrl, setEnrollUrl] = useState<string | null>(null);
+  // QR PNG URL cache-busted on regenerate so the <img> reloads.
+  const [aQrUrl, setAQrUrl] = useState<string | null>(null);
 
   const onGenerateUrl = async () => {
     const r = await enrollToken.mutateAsync(device.wg_ip);
     setEnrollUrl(r.enroll_url);
+  };
+
+  const onGenerateAndroidQr = async () => {
+    const r = await aEnroll.mutateAsync(device.wg_ip);
+    setAQrUrl(`${r.qr_url}?t=${Date.now()}`);
   };
 
   return (
@@ -70,6 +96,7 @@ export function MdmDialog({
       onOpenChange={(open) => {
         if (!open) {
           setEnrollUrl(null);
+          setAQrUrl(null);
           onClose();
         }
       }}
@@ -87,6 +114,21 @@ export function MdmDialog({
             </span>
           </ModalHeader>
           <ModalBody className="gap-4">
+            {isAndroid ? (
+              <AndroidMdmBody
+                device={device}
+                qrUrl={aQrUrl}
+                onGenerateQr={onGenerateAndroidQr}
+                generating={aEnroll.isPending}
+                onSyncPolicy={() => aSyncPolicy.mutate(device.wg_ip)}
+                syncingPolicy={aSyncPolicy.isPending}
+                onSyncStatus={() => aSyncStatus.mutate(device.wg_ip)}
+                syncingStatus={aSyncStatus.isPending}
+                onUnenroll={() => aUnenroll.mutate(device.wg_ip)}
+                unenrolling={aUnenroll.isPending}
+              />
+            ) : (
+              <>
             {/* Status panel ------------------------------------------------ */}
             <div className="flex items-center gap-2 flex-wrap">
               {device.mdm ? (
@@ -271,6 +313,8 @@ export function MdmDialog({
                 )}
               </div>
             )}
+              </>
+            )}
           </ModalBody>
           <ModalFooter>
             <Button variant="light" onPress={onClose}>
@@ -280,5 +324,153 @@ export function MdmDialog({
         </>
       </ModalContent>
     </Modal>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Android Management API body. Much simpler than the iOS one — there's no
+// command queue, no command responses, no APNs push. Just: generate a QR,
+// scan it on a factory-reset phone, then watch status flip from pending
+// to active. Policy updates propagate automatically via the kids.yaml
+// mutation watcher; the buttons here are manual override.
+
+function AndroidMdmBody({
+  device,
+  qrUrl,
+  onGenerateQr,
+  generating,
+  onSyncPolicy,
+  syncingPolicy,
+  onSyncStatus,
+  syncingStatus,
+  onUnenroll,
+  unenrolling,
+}: {
+  device: Device;
+  qrUrl: string | null;
+  onGenerateQr: () => void;
+  generating: boolean;
+  onSyncPolicy: () => void;
+  syncingPolicy: boolean;
+  onSyncStatus: () => void;
+  syncingStatus: boolean;
+  onUnenroll: () => void;
+  unenrolling: boolean;
+}) {
+  const state = device.android_mdm;
+  const active = state?.status === "active";
+
+  return (
+    <>
+      <div className="flex items-center gap-2 flex-wrap">
+        {state ? (
+          <>
+            <Chip size="sm" color={statusColor(state.status)} variant="flat">
+              {state.status}
+            </Chip>
+            {state.model && (
+              <Chip size="sm" variant="flat">
+                {state.model}
+              </Chip>
+            )}
+            {state.applied_policy_version && (
+              <Chip size="sm" variant="flat">
+                policy v{state.applied_policy_version}
+              </Chip>
+            )}
+            <span className="text-xs text-default-500">
+              last status: {formatAgo(state.last_status_at)}
+            </span>
+          </>
+        ) : (
+          <Chip size="sm" variant="flat">
+            not enrolled
+          </Chip>
+        )}
+      </div>
+
+      {!active && (
+        <div className="border border-default-200 rounded-medium p-3 bg-content2/40">
+          <p className="text-sm font-medium mb-2">
+            Enrol with Android Management API
+          </p>
+          <ol className="list-decimal pl-5 text-sm space-y-1 mb-3 text-default-700">
+            <li>Factory-reset the phone (Settings → System → Reset, or skip if new).</li>
+            <li>
+              On the welcome screen, tap the screen <em>six times in the same spot</em> —
+              the QR scanner opens.
+            </li>
+            <li>Scan the QR code below. The phone provisions automatically (~2 min).</li>
+          </ol>
+
+          {qrUrl ? (
+            <div className="flex flex-col items-start gap-2">
+              <img
+                src={qrUrl}
+                alt="Android enrollment QR"
+                className="w-64 h-64 border border-default-200 rounded"
+              />
+              <div className="flex gap-2">
+                <Button size="sm" variant="flat" onPress={onGenerateQr} isLoading={generating}>
+                  Regenerate
+                </Button>
+              </div>
+              <p className="text-xs text-warning">
+                Single-use, valid for 1 hour. Generate a new one if setup fails partway.
+              </p>
+            </div>
+          ) : (
+            <Button
+              size="sm"
+              color="primary"
+              onPress={onGenerateQr}
+              isLoading={generating}
+            >
+              Generate enrolment QR
+            </Button>
+          )}
+        </div>
+      )}
+
+      {state && (
+        <div className="flex gap-2 flex-wrap">
+          <Button
+            size="sm"
+            variant="flat"
+            onPress={onSyncPolicy}
+            isLoading={syncingPolicy}
+          >
+            Re-push policy
+          </Button>
+          <Button
+            size="sm"
+            variant="flat"
+            onPress={onSyncStatus}
+            isLoading={syncingStatus}
+          >
+            Refresh status
+          </Button>
+          <Button
+            size="sm"
+            variant="flat"
+            color="danger"
+            onPress={onUnenroll}
+            isLoading={unenrolling}
+          >
+            Unenroll
+          </Button>
+        </div>
+      )}
+
+      {state?.device_name && (
+        <details className="text-xs text-default-500">
+          <summary className="cursor-pointer">AMAPI resource names</summary>
+          <div className="mt-1 font-mono break-all">
+            <div>device: {state.device_name}</div>
+          </div>
+        </details>
+      )}
+    </>
   );
 }

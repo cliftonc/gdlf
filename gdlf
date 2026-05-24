@@ -255,6 +255,158 @@ EOF
         ;;
     esac
     ;;
+  amapi)
+    # Manage Android Management API (AMAPI) configuration — the Android
+    # equivalent of `./gdlf apns` + `./gdlf mdm-ca` combined. Setup is:
+    #
+    #   ./gdlf amapi init                            (instructions only)
+    #   ./gdlf amapi enterprise signup <callback>    -> URL parent visits
+    #   ./gdlf amapi enterprise complete <token> <signup_url_name>
+    #   ./gdlf amapi status
+    sub="${1:-help}"; shift || true
+    AMAPI_DIR="config/state/amapi"
+    SA_JSON="$AMAPI_DIR/service-account.json"
+    ENT_JSON="$AMAPI_DIR/enterprise.json"
+
+    case "$sub" in
+      init)
+        mkdir -p "$AMAPI_DIR"
+        chmod 700 "$AMAPI_DIR"
+        cat <<EOF
+gdlf amapi init — one-time GCP setup walk-through.
+
+1. Create (or pick) a Google Cloud project at https://console.cloud.google.com/.
+
+2. Enable the Android Management API:
+     https://console.cloud.google.com/apis/library/androidmanagement.googleapis.com
+
+3. Create a service account with role 'Android Management User':
+     https://console.cloud.google.com/iam-admin/serviceaccounts
+   Then "Manage keys" -> "Add key" -> JSON -> download.
+
+4. Move the downloaded JSON to:
+     $SA_JSON
+   (chmod 600 — it's effectively a long-lived credential.)
+
+5. Continue with:
+     ./gdlf amapi enterprise signup <callback_url>
+   where <callback_url> can be anything reachable in a browser — even
+   http://localhost/ works; we only need the ?enterpriseToken= parameter
+   Google appends to it.
+
+Current state:
+EOF
+        if [[ -f "$SA_JSON" ]]; then
+          echo "  ok    $SA_JSON"
+        else
+          echo "  miss  $SA_JSON"
+        fi
+        if [[ -f "$ENT_JSON" ]]; then
+          echo "  ok    $ENT_JSON"
+        else
+          echo "  miss  $ENT_JSON"
+        fi
+        ;;
+      enterprise)
+        ent_sub="${1:-help}"; shift || true
+        case "$ent_sub" in
+          signup)
+            if [[ $# -ne 1 ]]; then
+              echo "Usage: ./gdlf amapi enterprise signup <callback_url>" >&2
+              exit 2
+            fi
+            if [[ ! -f "$SA_JSON" ]]; then
+              echo "missing $SA_JSON — run ./gdlf amapi init first" >&2
+              exit 1
+            fi
+            callback="$1"
+            # Run inside the rules-svc container so we use the same python +
+            # creds path that the running app uses.
+            $COMPOSE exec -T rules-svc python3 -c "
+import json
+from gdlf.amapi import enterprise
+out = enterprise.create_signup_url(callback_url='$callback')
+print(json.dumps(out, indent=2))
+"
+            cat <<EOF
+
+Open the printed 'url' in your browser, sign in with the Google account
+that should own this Android Enterprise, and complete the workflow.
+
+Google will redirect to: $callback?enterpriseToken=<token>
+
+Copy the enterpriseToken AND the 'name' field from the JSON above (looks
+like 'signupUrls/Cxxx'), then run:
+
+  ./gdlf amapi enterprise complete <enterpriseToken> <signupUrlName>
+EOF
+            ;;
+          complete)
+            if [[ $# -ne 2 ]]; then
+              echo "Usage: ./gdlf amapi enterprise complete <enterpriseToken> <signupUrlName>" >&2
+              exit 2
+            fi
+            token="$1"
+            signup_name="$2"
+            $COMPOSE exec -T rules-svc python3 -c "
+from gdlf.amapi import enterprise
+cfg = enterprise.complete_signup(enterprise_token='$token', signup_url_name='$signup_name')
+print('Enterprise created:', cfg.name)
+print('Saved to: config/state/amapi/enterprise.json')
+"
+            ;;
+          help|-h|--help|"")
+            cat <<EOF
+gdlf amapi enterprise — one-time Android Enterprise signup.
+
+  ./gdlf amapi enterprise signup <callback_url>
+      create a signup URL the parent visits in their browser
+
+  ./gdlf amapi enterprise complete <enterpriseToken> <signupUrlName>
+      finalise signup with the values Google handed back
+EOF
+            ;;
+          *)
+            echo "unknown enterprise subcommand: $ent_sub" >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      status)
+        echo "AMAPI material in $AMAPI_DIR:"
+        for f in "$SA_JSON" "$ENT_JSON"; do
+          if [[ -f "$f" ]]; then echo "  ok    $f"; else echo "  miss  $f"; fi
+        done
+        if [[ -f "$ENT_JSON" ]]; then
+          echo
+          echo "Enterprise:"
+          if command -v jq >/dev/null 2>&1; then
+            jq . "$ENT_JSON" | sed 's/^/  /'
+          else
+            sed 's/^/  /' "$ENT_JSON"
+          fi
+        fi
+        ;;
+      help|-h|--help|"")
+        cat <<EOF
+gdlf amapi — manage the Android Management API integration.
+
+  ./gdlf amapi init                          one-time GCP setup instructions
+  ./gdlf amapi enterprise signup <cb>        create signup URL for the parent
+  ./gdlf amapi enterprise complete <t> <n>   finalise signup
+  ./gdlf amapi status                        show file presence + enterprise
+
+After enterprise is configured, per-device enrollment lives on the
+dashboard: open a device's MDM dialog -> "Generate Android enrollment QR".
+EOF
+        ;;
+      *)
+        echo "unknown amapi subcommand: $sub" >&2
+        echo "try: ./gdlf amapi help" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   mdm-ca)
     # The gdlf MDM CA signs per-device identity certs that authenticate
     # devices to the MDM server over mTLS. Separate from the mitmproxy CA
@@ -332,6 +484,7 @@ gdlf — usage:
   ./gdlf web-dev            Vite dev server (HMR) proxying /api to the stack
   ./gdlf apns ...           manage the Apple APNs MDM Push Certificate
   ./gdlf mdm-ca ...         manage the gdlf MDM signing CA (device identity certs)
+  ./gdlf amapi ...          manage the Android Management API integration
 
 Dashboard: http://localhost:\${DASHBOARD_PORT:-8080}
 EOF
