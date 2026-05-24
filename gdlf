@@ -55,6 +55,14 @@ case "$cmd" in
     $COMPOSE build --no-cache "$@"
     $COMPOSE up -d "$@"
     ;;
+  web-dev)
+    # Run the Vite dev server with HMR; API calls proxy to the rules-svc
+    # container at http://localhost:${DASHBOARD_PORT:-8080}.
+    port="${DASHBOARD_PORT:-8080}"
+    cd services/rules-svc/web
+    if [[ ! -d node_modules ]]; then npm install --legacy-peer-deps; fi
+    GDLF_API_TARGET="http://localhost:${port}" npm run dev
+    ;;
   help|-h|--help|"")
     cat <<EOF
 gdlf — usage:
@@ -66,6 +74,7 @@ gdlf — usage:
   ./gdlf ps                 service status
   ./gdlf shell [svc]        shell into a container (default: rules-svc)
   ./gdlf rebuild [svc]      $COMPOSE build --no-cache + up
+  ./gdlf web-dev            Vite dev server (HMR) proxying /api to the stack
 
 Dashboard: http://localhost:\${DASHBOARD_PORT:-8080}
 EOF

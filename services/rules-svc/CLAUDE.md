@@ -1,107 +1,150 @@
 # rules-svc
 
-FastAPI app. It's the control plane, dashboard, and event sink — everything
-that isn't directly forwarding packets goes through here.
+FastAPI app — control plane, JSON API, and event sink. Everything that
+isn't directly forwarding packets goes through here.
 
 ## Responsibilities
 
-1. **Dashboard** — Kids, Activity, Rules library, Settings (Jinja + HTMX).
-2. **Source-of-truth I/O** — read & write `config/kids.yaml`.
-3. **WireGuard control** — generate device keypairs, allocate `/32` IPs,
-   render `wg0.conf`, reload the wg container.
-4. **AdGuard sync** — push one `gdlf:<kid>:<device>` client per WG IP, with
-   parental/safesearch/blocked-services flags. Reconciles every 60s.
-5. **Decision API** for the mitmproxy addon (`POST /api/decision`).
-6. **Event ingest** from the addon (`POST /api/events`) → SQLite.
+1. **JSON API** for the React SPA (`/api/*`) and the mitmproxy addon
+   (`POST /api/decision`, `POST /api/events`).
+2. **SPA hosting** — serves the built React app from `/app/web/` (multi-stage
+   Dockerfile copies the Vite bundle in). Catch-all route returns
+   `index.html` for client-routed deep links.
+3. **Source-of-truth I/O** — read & write `config/kids.yaml` under filelock.
+4. **WireGuard control** — generate device keypairs, allocate `/32` IPs,
+   render `wg0.conf`, reload the wg container via the docker socket.
+5. **AdGuard sync** — push one `gdlf:<kid>:<device>` client per WG IP every 60s.
+6. **Event ingest** from the addon → SQLite + SSE fanout to live subscribers.
 7. **Alerting** — fire webhook + email on `flag` events.
 8. **Retention** — prune the events table hourly, VACUUM daily.
 
 ## Module map
 
-| File          | Responsibility                                                        |
-| ------------- | --------------------------------------------------------------------- |
-| `main.py`     | FastAPI app, routes, lifespan, background tasks. The HTTP surface.    |
-| `schema.py`   | Pydantic v2 models for kids.yaml. Single source of contract.          |
-| `store.py`    | Load/save kids.yaml. `filelock` + in-place write (see Gotchas).       |
-| `settings.py` | Frozen dataclass from env vars. Imported as `from .settings import settings`. |
-| `wg.py`       | X25519 keypair gen, IP allocation, wg0.conf rendering, docker exec via socket. |
-| `rules.py`    | URL-rule evaluator — `evaluate(kid, host, path, query)` → `Decision`. |
-| `db.py`       | SQLModel Event / Handshake / AlertLog; `recent_events`, `prune`, `vacuum`. |
-| `adguard.py`  | REST-API client + 60s sync loop.                                      |
-| `alerts.py`   | Webhook + SMTP dispatcher; logs each attempt to `AlertLog`.           |
-| `addons/mitm_capture.py` | mitmproxy addon (mounted into the mitm container).         |
-| `templates/`  | Jinja templates. `base.html` + per-page; `_activity_rows.html` is an HTMX fragment. |
-| `static/app.css` | Dark UI. `main.container-wide` is `!important` everywhere because of cache surprises. |
+| File             | Responsibility                                                        |
+| ---------------- | --------------------------------------------------------------------- |
+| `main.py`        | App, middleware, lifespan, non-API utility routes (CA, QR, wg conf), SPA catch-all, mitmproxy `/api/decision` + `/api/events`. |
+| `api_auth.py`    | `/api/auth/login`, `/logout`, `/me` — cookie-based session.           |
+| `api_kids.py`    | Kid CRUD, schedule, bonus, block.                                     |
+| `api_devices.py` | Device CRUD, enrolment, handshake, regenerate, mitm-installed flag.   |
+| `api_rules.py`   | URL-rule CRUD, suggest, library reference.                            |
+| `api_activity.py`| Activity list + SSE stream.                                           |
+| `api_settings.py`| Settings + DB stats + prune-now.                                      |
+| `dto.py`         | Shared projection from pydantic models to JSON DTOs.                  |
+| `pubsub.py`      | In-process publish/subscribe used by SSE.                             |
+| `schema.py`      | Pydantic v2 models for kids.yaml. Single source of contract.          |
+| `store.py`       | Load/save kids.yaml. `filelock` + in-place write.                     |
+| `settings.py`    | Frozen dataclass from env vars (`from .settings import settings`).    |
+| `wg.py`          | X25519 keypair gen, IP allocation, wg0.conf rendering, docker exec.   |
+| `rules.py`       | URL-rule evaluator + `suggest_match()` helper.                        |
+| `db.py`          | SQLModel Event/Handshake/AlertLog; `recent_events`, `prune`, `vacuum`.|
+| `adguard.py`     | REST-API client + 60s sync loop.                                      |
+| `alerts.py`      | Webhook + SMTP dispatcher; logs each attempt to `AlertLog`.           |
+| `auth.py`        | HMAC cookie token primitives.                                         |
+| `addons/mitm_capture.py` | mitmproxy addon (mounted into the mitm container).            |
+| `web/`           | Vite + React + TypeScript SPA (HeroUI, TanStack, zod, Tailwind).      |
 
 ## How it talks to other services
 
-| Peer        | Direction      | Protocol                            | Why                                  |
-| ----------- | -------------- | ----------------------------------- | ------------------------------------ |
-| mitmproxy   | mitm → svc     | HTTP POST `/api/decision`           | Per-request allow/block/flag         |
-| mitmproxy   | mitm → svc     | HTTP POST `/api/events`             | Log every request                    |
-| AdGuard     | svc → adguard  | HTTP REST (`10.42.0.2:80`)          | Push per-client config every 60s     |
-| wg (docker) | svc → docker.sock | `httpx` over `/var/run/docker.sock` | exec `wg syncconf`, restart on reload |
-| kids.yaml   | both ways      | filesystem (`config/kids.yaml`)     | Source of truth                      |
-| nftables    | none directly  | nft reads kids.yaml on its own loop | We don't push, we publish via yaml   |
+| Peer        | Direction         | Protocol                            | Why                                  |
+| ----------- | ----------------- | ----------------------------------- | ------------------------------------ |
+| Browser SPA | browser → svc     | HTTP JSON `/api/*` + SSE `/api/activity/stream` | Dashboard UI         |
+| mitmproxy   | mitm → svc        | HTTP POST `/api/decision`           | Per-request allow/block/flag         |
+| mitmproxy   | mitm → svc        | HTTP POST `/api/events`             | Log every request                    |
+| AdGuard     | svc → adguard     | HTTP REST (`10.42.0.2:80`)          | Push per-client config every 60s     |
+| wg (docker) | svc → docker.sock | `httpx` over `/var/run/docker.sock` | exec `wg syncconf`, restart on reload|
+| kids.yaml   | both ways         | filesystem (`config/kids.yaml`)     | Source of truth                      |
+| nftables    | none directly     | nft reads kids.yaml on its own loop | We publish via yaml, no push         |
+
+## Front-end (`web/`)
+
+- **Build**: `vite build` → `dist/`. The Dockerfile's `node:20-slim` builder
+  stage emits this; the Python image `COPY --from=web /web/dist /app/web`.
+- **Dev**: `./gdlf web-dev` runs Vite on :5173 with `/api`, `/devices/*`,
+  `/ca*` proxied to the running rules-svc container.
+- **Routing**: TanStack Router, file-based under `web/src/routes/`. The
+  route tree is regenerated by `@tanstack/router-plugin/vite` on each build.
+- **Data**: TanStack Query for caching/polling. SSE in
+  `hooks/useActivityStream.ts` prepends events into the activity cache;
+  falls back to 5s `invalidateQueries` polling on disconnect.
+- **Components**: HeroUI (`@heroui/react`) on Tailwind. Dark/light via
+  `next-themes`. All destructive actions go through `useConfirm()` → a
+  single `<ConfirmModal>`; no `window.confirm` anywhere.
+- **API contract**: shared via zod schemas in `web/src/lib/schemas.ts`.
+  Mirror the Python DTOs in `src/gdlf/dto.py` — keep both in sync.
+
+## Auth flow
+
+- Cookie `gdlf_auth` set by `POST /api/auth/login`, HMAC-signed with a key
+  derived from `RULES_SVC_ADMIN_PASSWORD`. Empty password → middleware is
+  a no-op (dev / first boot).
+- Middleware: unauthenticated `/api/*` → JSON 401. Unauthenticated
+  non-API → still serves `index.html` so the SPA can route to `/login`
+  itself (the URL the user typed stays intact).
+- Public allow-list: `/healthz`, `/ca.pem`, `/ca/qr`, `/devices/{ip}/qr`,
+  `/devices/{ip}/conf` (links must be scannable from un-enrolled phones),
+  `/api/decision`, `/api/events` (mitmproxy), `/api/auth/login`, and the
+  Vite `/assets/` bundle.
 
 ## Gotchas
 
-* **Bind-mounted single file can't be `os.replace()`'d.** `kids.yaml` is
-  mounted file-by-file from the host, so the atomic rename pattern fails
-  with `EBUSY`. `store.save()` writes in place under `filelock`. Tolerable
-  because all writes are serialized.
+* **Bind-mounted single-file `os.replace()` fails.** `kids.yaml` is mounted
+  file-by-file from the host so atomic rename hits `EBUSY`. `store.save()`
+  writes in place under `filelock`.
 
-* **Starlette's `TemplateResponse(name, ctx)` signature is deprecated.**
-  Use `TemplateResponse(request, name, context)`. Helper: `_render(request,
-  name, **extra)` in `main.py`.
-
-* **Docker CLI is not installed in the rules-svc image** (the Debian
-  `docker.io` package only ships `dockerd`, not `docker`). `wg.py` talks
-  to the docker daemon directly via `httpx` over `/var/run/docker.sock`.
-  The exec implementation handles the 8-byte multiplex frame headers
-  manually — see `_docker_exec()`.
-
-* **CSS cache-busting** — `templates.env.globals["css_v"]` returns the
-  CSS file's mtime; `base.html` uses `?v={{ css_v() }}` so the browser
-  always picks up the latest. Saves hard-refresh dances after layout changes.
+* **Docker CLI isn't installed in the image.** `wg.py` talks to the docker
+  daemon directly via `httpx` over `/var/run/docker.sock`. Handles the 8-byte
+  multiplex frame headers manually — see `_docker_exec()`.
 
 * **WAL mode for SQLite.** Concurrent inserts (`/api/events`) and the
-  hourly prune deadlocked occasionally in default journal mode. Enabled
-  in `db.engine()`.
+  hourly prune deadlocked occasionally in default journal mode. Enabled in
+  `db.engine()`.
 
 * **Detached-instance SQLAlchemy errors.** After `db.insert(ev)` the
-  session is closed, so `ev.decision` etc. raise `DetachedInstanceError`
-  on access. Use the request `payload` dict for flag-check logic, not the
-  ORM instance.
+  session is closed, so `ev.decision` etc. raise `DetachedInstanceError`.
+  The `/api/events` handler builds the SSE DTO from the inbound payload,
+  not the ORM instance, to avoid this. Same trick for the alert-firing
+  branch — pass `payload` not `ev`.
 
-* **Mitmproxy addon lives here, but runs there.** `addons/mitm_capture.py`
-  is mounted read-only into `gdlf-mitm` at `/addons/`. Edit here, rebuild
-  the mitm container (or just `docker restart gdlf-mitm` — mitmproxy
-  watches the script and reloads).
+* **SSE fanout drops on slow consumers.** `pubsub.publish()` does
+  `put_nowait` against a bounded queue (depth 100). Slow subscribers miss
+  events rather than block the writer.
 
-## Adding a new dashboard page
+* **Mitmproxy addon lives here, runs there.** `addons/mitm_capture.py` is
+  mounted read-only into `gdlf-mitm` at `/addons/`. Edit here, rebuild
+  the mitm container (or just `docker restart gdlf-mitm`).
 
-1. New route in `main.py`. Use `_render(request, "x.html", foo=bar)`.
-2. New template in `templates/`. Extends `base.html`. Set `{% set nav =
-   "..." %}` to highlight the right top-nav item and `{% set wide = true %}`
-   if you want the page to use the edge-to-edge layout.
+## Adding a new page
+
+1. New file under `web/src/routes/` (e.g. `web/src/routes/foo.tsx`). Export
+   a `Route = createFileRoute('/foo')({ component: FooPage })`. The router
+   plugin picks it up on next `vite` run.
+2. Need new data? Add a `/api/<name>` endpoint in a new or existing
+   `api_*.py` router and `app.include_router(...)` it in `main.py`. Mirror
+   the DTO shape with a zod schema in `web/src/lib/schemas.ts`.
+3. Need a query? Add to `web/src/lib/queries.ts` (TanStack Query).
+4. Need a mutation? Add to `web/src/lib/mutations.ts` and invalidate the
+   relevant query keys in `onSuccess`.
 
 ## Adding a kids.yaml field
 
 1. Add to `schema.py` with sensible default.
 2. Anywhere that reads it via `store.load()` gets it for free.
-3. If the nftables sidecar or adguard sync needs it, add to those.
-4. **Don't backfill the YAML** — pydantic defaults handle absent fields,
-   and the next mutate-and-save round-trip materializes it.
+3. If a DTO consumer needs it, surface it in `dto.py` and add it to the
+   matching zod schema in `web/src/lib/schemas.ts`.
+4. **Don't backfill the YAML** — pydantic defaults handle absent fields.
 
 ## Tests / smoke
 
-There aren't formal tests yet. Quick checks:
-
 ```bash
-# Decision API end-to-end
+# Decision API end-to-end (must stay byte-identical)
 curl -s -X POST http://localhost:8080/api/decision -H 'content-type: application/json' \
   -d '{"client_ip":"10.13.13.3","host":"youtube.com","path":"/shorts/x"}'
+
+# Activity SSE stream
+curl -N http://localhost:8080/api/activity/stream -H 'Cookie: gdlf_auth=...'
+
+# Kids list
+curl -s http://localhost:8080/api/kids -H 'Cookie: gdlf_auth=...' | jq
 
 # Rule eval
 docker exec gdlf-rules python3 -c "
@@ -109,7 +152,4 @@ from gdlf.rules import evaluate
 from gdlf.schema import Kid, URLRule
 k = Kid(name='t', url_rules=[URLRule(action='block', match='youtube.com/shorts/*')])
 print(evaluate(k, 'youtube.com', '/shorts/x'))"
-
-# Storage stats
-curl -s http://localhost:8080/settings | grep -A1 "Activity storage"
 ```

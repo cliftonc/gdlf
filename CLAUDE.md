@@ -27,13 +27,13 @@ The original design discussion lives in [`docs/design.md`](docs/design.md).
             │ and talks to all of the above
             ▼
    ┌────────────────────────────────────────────┐
-   │  rules-svc  (FastAPI dashboard + control)  │
+   │  rules-svc  (FastAPI JSON API + React SPA) │
    │  • reads/writes kids.yaml (source of truth)│
    │  • renders wg0.conf, reloads wg container  │
    │  • syncs AdGuard per-client config         │
    │  • answers mitmproxy's per-request decision│
    │  • records events to SQLite, prunes daily  │
-   │  • serves the parent UI                    │
+   │  • serves the parent SPA (Vite/HeroUI)     │
    └────────────────────────────────────────────┘
 ```
 

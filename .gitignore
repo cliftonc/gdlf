@@ -14,6 +14,9 @@ config/mitmproxy/*
 config/state/
 config/nft-state/
 
+# Node
+node_modules/
+
 # Python
 __pycache__/
 *.pyc

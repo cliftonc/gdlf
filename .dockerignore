@@ -1,0 +1,21 @@
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.pyc
+
+# Web build artefacts — Dockerfile rebuilds them.
+services/rules-svc/web/node_modules
+services/rules-svc/web/dist
+services/rules-svc/web/.vite
+services/rules-svc/web/src/routeTree.gen.ts
+
+# Local config / state — bind-mounted from host.
+config/state
+config/wg-keys
+config/mitmproxy
+config/kids.yaml
+
+.git
+.env
+.DS_Store

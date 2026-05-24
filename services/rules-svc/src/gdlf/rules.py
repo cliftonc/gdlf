@@ -57,9 +57,41 @@ def match_rule(rule: URLRule, host: str, path: str, query: str | None) -> bool:
     if not _path_matches(pp, path):
         return False
     if rule.query:
-        if not re.search(rule.query, query or ""):
+        # Treat a malformed regex as non-matching so a typo in kids.yaml
+        # doesn't crash the decision API (which would then fail open).
+        # Rule creation also validates up-front; this is defense in depth.
+        try:
+            if not re.search(rule.query, query or ""):
+                return False
+        except re.error:
+            import logging
+            logging.getLogger("gdlf.rules").warning(
+                "rule has invalid query regex %r — skipping", rule.query
+            )
             return False
     return True
+
+
+def suggest_match(host: str, path: str) -> str:
+    """Build a sensible match pattern from an observed host+path.
+
+    Examples:
+      youtube.com  /shorts/abc       -> youtube.com/shorts/*
+      google.com   /search           -> google.com/search
+      reddit.com   /r/teens/comments -> reddit.com/r/teens/*
+      example.com  /                 -> example.com
+    """
+    host = (host or "").strip().lower()
+    path = (path or "").strip() or "/"
+    if path in ("", "/"):
+        return host
+    segs = [s for s in path.split("/") if s]
+    if not segs:
+        return host
+    if len(segs) == 1:
+        return f"{host}/{segs[0]}"
+    take = segs[:2] if len(segs) > 2 else segs[:1]
+    return f"{host}/{'/'.join(take)}/*"
 
 
 def evaluate(kid: Kid, host: str, path: str = "/", query: str | None = None) -> Decision:

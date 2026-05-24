@@ -236,7 +236,10 @@ class GdlfAddon:
         client_ip = flow.client_conn.peername[0] if flow.client_conn.peername else ""
         host = req.pretty_host
         path = req.path.split("?", 1)[0] if "?" in req.path else req.path
-        query = req.query.fields and req.url.split("?", 1)[1] if "?" in req.url else None
+        # Always pass a string-or-None — earlier we relied on `req.query.fields`
+        # truthiness, but empty-fields returns an empty *list* which (after JSON
+        # round-trip) violated the DB's TEXT column and crashed the event insert.
+        query = req.url.split("?", 1)[1] if "?" in req.url else None
 
         decision = await self._decision(client_ip, host, path, query)
         action = decision.get("action", "allow")
