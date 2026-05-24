@@ -118,13 +118,17 @@ Each subdirectory has its own `CLAUDE.md` with the specifics.
 ./gdlf rebuild     # full no-cache rebuild + recreate
 ./gdlf down        # stop
 
-# MDM (Apple iOS, optional — see services/rules-svc/CLAUDE.md and services/proxy/CLAUDE.md):
+# MDM (Apple iOS, optional — see docs/setup-apple-mdm.md):
 ./gdlf apns ...    # APNs MDM Push Cert workflow (csr → submit → decrypt)
 ./gdlf mdm-ca ...  # gdlf MDM signing CA (issues per-device identity certs)
 
-# MDM (Android via Android Management API, optional — see services/rules-svc/CLAUDE.md):
+# MDM (Android via Android Management API, optional — see docs/setup-android-mdm.md):
 ./gdlf amapi ...   # AMAPI setup: GCP service-account + EMM enterprise signup
 ```
+
+End-to-end MDM setup walk-throughs:
+- [docs/setup-android-mdm.md](docs/setup-android-mdm.md) — Android (~15 min, simpler)
+- [docs/setup-apple-mdm.md](docs/setup-apple-mdm.md) — iOS (~30 min, more pieces)
 
 `./gdlf up` automatically enables the `mdm` compose profile (which adds the
 Caddy front-door for /mdm/*) when `MDM_HOSTNAME` is set in `.env`.
