@@ -6,6 +6,7 @@ import {
   HandshakeSchema,
   KidDetailSchema,
   KidSummarySchema,
+  MdmCommandsSchema,
   ServiceCatalogSchema,
   SettingsSchema,
   TlsFailureGroupSchema,
@@ -14,6 +15,7 @@ import {
   type Handshake,
   type KidDetail,
   type KidSummary,
+  type MdmCommands,
   type ServiceCatalog,
   type Settings,
   type TlsFailureGroup,
@@ -32,6 +34,7 @@ export const qk = {
   settings: ["settings"] as const,
   services: ["services"] as const,
   ruleSuggest: (host: string, path: string) => ["rule-suggest", host, path] as const,
+  mdmCommands: (ip: string) => ["mdm-commands", ip] as const,
 };
 
 export type ActivityParams = {
@@ -134,6 +137,20 @@ export function useServices() {
       ServiceCatalogSchema.parse(await api<unknown>("/api/services")) as ServiceCatalog,
     // Catalog is global and effectively static — cache aggressively.
     staleTime: 5 * 60_000,
+  });
+}
+
+export function useMdmCommands(ip: string, enabled = true) {
+  return useQuery({
+    queryKey: qk.mdmCommands(ip),
+    queryFn: async () => {
+      const data = await api<unknown>(`/api/devices/${encodeURIComponent(ip)}/mdm/commands`);
+      return MdmCommandsSchema.parse(data) as MdmCommands;
+    },
+    // Poll while the MDM panel is open — devices respond asynchronously
+    // and the parent wants to see Acknowledged transitions live.
+    refetchInterval: enabled ? 4_000 : false,
+    enabled,
   });
 }
 

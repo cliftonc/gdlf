@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   createFileRoute,
   Link,
@@ -8,11 +9,12 @@ import {
   CardBody,
   CardHeader,
   Chip,
+  Snippet,
   Spinner,
   Switch,
 } from "@heroui/react";
 import { useEnrolment, useHandshake } from "../lib/queries";
-import { useMarkMitmInstalled } from "../lib/mutations";
+import { useMarkMitmInstalled, useMdmEnrollToken } from "../lib/mutations";
 
 export const Route = createFileRoute("/kids/$name/devices/$ip/enrol")({
   component: DeviceEnrolPage,
@@ -22,6 +24,103 @@ function formatBytes(b: number): string {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${Math.round(b / 1024)} KiB`;
   return `${(b / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+/** Surfaced above the manual WG/CA steps when the device is iOS. MDM is the
+ *  preferred path — it pushes the WG always-on config + CA trust + bypass
+ *  restrictions as a single non-removable profile, so the kid can't undo
+ *  any of it. Once enrolled, the manual Steps 1+3 below become redundant. */
+function MdmEnrolCard({
+  kidName,
+  ip,
+  mdmStatus,
+}: {
+  kidName: string;
+  ip: string;
+  mdmStatus: "pending" | "enrolled" | "checked_out" | null;
+}) {
+  const [enrollUrl, setEnrollUrl] = useState<string | null>(null);
+  const enrollToken = useMdmEnrollToken(kidName);
+
+  const onGenerate = async () => {
+    const r = await enrollToken.mutateAsync(ip);
+    setEnrollUrl(r.enroll_url);
+  };
+
+  const alreadyEnrolled = mdmStatus === "enrolled";
+
+  return (
+    <Card className="border border-primary-200 bg-primary-50/30">
+      <CardHeader className="flex flex-col items-start gap-1">
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-semibold">Recommended · iOS supervised MDM</p>
+          {alreadyEnrolled ? (
+            <Chip size="sm" color="success" variant="flat">
+              enrolled
+            </Chip>
+          ) : (
+            <Chip size="sm" color="primary" variant="flat">
+              one-shot setup
+            </Chip>
+          )}
+        </div>
+        <p className="text-xs text-default-500">
+          The MDM profile pushes the WireGuard always-on tunnel, the inspection CA,
+          and bypass-blocking restrictions — all locked so the kid can't undo them.
+          Replaces Steps 1 + 3 below.
+        </p>
+      </CardHeader>
+      <CardBody className="flex flex-col gap-3">
+        {alreadyEnrolled ? (
+          <p className="text-sm text-success">
+            This device is already MDM-enrolled. Use the MDM dialog on the kid page to
+            re-push policy or query state.
+          </p>
+        ) : (
+          <>
+            <ol className="list-decimal pl-5 text-sm space-y-1 text-default-700">
+              <li>Cable the iPhone to a Mac running Apple Configurator 2.</li>
+              <li>
+                In Configurator: <em>Prepare…</em> → <em>Manual Configuration</em>,
+                tick <em>Supervise devices</em>, then <em>Add to Device Enrollment Program</em>.
+              </li>
+              <li>When prompted for an MDM server URL, paste the link below.</li>
+              <li>
+                Continue. The device wipes + supervises + enrolls. WG, CA, and
+                restrictions install automatically within ~30s of enrolment.
+              </li>
+            </ol>
+            {enrollUrl ? (
+              <div className="flex flex-col gap-2">
+                <Snippet
+                  size="sm"
+                  symbol=""
+                  classNames={{ pre: "whitespace-pre-wrap break-all" }}
+                >
+                  {enrollUrl}
+                </Snippet>
+                <p className="text-xs text-warning">
+                  Valid for 30 minutes. Single-use — generate a new one if Configurator
+                  fails partway.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <Button
+                  size="sm"
+                  color="primary"
+                  onPress={onGenerate}
+                  isLoading={enrollToken.isPending}
+                >
+                  Generate enrolment URL
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </CardBody>
+    </Card>
+  );
 }
 
 function DeviceEnrolPage() {
@@ -57,6 +156,10 @@ function DeviceEnrolPage() {
         <h1 className="text-2xl font-semibold mt-1">Enrol {e.device.name}</h1>
         <p className="text-sm text-default-500 font-mono">{e.device.wg_ip}</p>
       </div>
+
+      {e.device.platform === "ios" && (
+        <MdmEnrolCard kidName={name} ip={ip} mdmStatus={e.device.mdm?.status ?? null} />
+      )}
 
       <Card>
         <CardHeader className="flex flex-col items-start gap-1">

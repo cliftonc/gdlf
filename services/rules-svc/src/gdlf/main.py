@@ -33,6 +33,7 @@ from . import (
     api_auth,
     api_devices,
     api_kids,
+    api_mdm,
     api_rules,
     api_services,
     api_settings,
@@ -96,6 +97,7 @@ app.include_router(api_services.router)
 app.include_router(api_activity.router)
 app.include_router(api_settings.router)
 app.include_router(api_tls_failures.router)
+app.include_router(api_mdm.router)
 
 # Where the multi-stage Dockerfile lands the built SPA. The dev server
 # (`./gdlf web-dev`) runs Vite separately and proxies /api back to here, so
@@ -132,6 +134,10 @@ def _is_public(path: str) -> bool:
         return True
     if path.startswith("/devices/") and (path.endswith("/conf") or path.endswith("/qr")):
         return True
+    # MDM endpoints: device-presented at TLS layer (mTLS verified by Caddy),
+    # never reached by a browser; bypass the cookie auth.
+    if path.startswith("/mdm/"):
+        return True
     return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
 
 
@@ -157,33 +163,38 @@ async def require_auth(request: Request, call_next):
 # Non-API utility routes: binary / SVG / plaintext.
 
 
-@app.get("/devices/{ip}/conf", response_class=PlainTextResponse)
-def device_conf(ip: str):
+def _render_client_conf(ip: str) -> tuple[str, str]:
+    """Render a fresh wg-quick conf from the device's priv key + current
+    settings (Endpoint, DNS, subnet). Always returns up-to-date config —
+    don't read the cached `.conf` file written at create time, since
+    WG_HOST / WG_PORT / WG_SUBNET may have changed since.
+    Returns (peer_id, conf_text)."""
     cfg = store.load()
     found = cfg.device_by_ip(ip)
     if not found:
         raise HTTPException(404, "unknown device")
     kid, device = found
     peer_id = f"{wg.slug(kid.name)}__{wg.slug(device.name)}"
-    conf_p = settings.state_dir / "wg-keys" / f"{peer_id}.conf"
-    if not conf_p.exists():
-        raise HTTPException(500, "client conf missing — re-enrol device")
+    try:
+        priv = wg.load_peer_priv(peer_id)
+    except FileNotFoundError:
+        raise HTTPException(500, "private key missing — re-enrol device")
+    return peer_id, wg.build_client_conf(device.name, priv, device.wg_ip)
+
+
+@app.get("/devices/{ip}/conf", response_class=PlainTextResponse)
+def device_conf(ip: str):
+    peer_id, conf = _render_client_conf(ip)
     return PlainTextResponse(
-        conf_p.read_text(),
+        conf,
         headers={"Content-Disposition": f'attachment; filename="{peer_id}.conf"'},
     )
 
 
 @app.get("/devices/{ip}/qr")
 def device_qr(ip: str):
-    cfg = store.load()
-    found = cfg.device_by_ip(ip)
-    if not found:
-        raise HTTPException(404, "unknown device")
-    kid, device = found
-    peer_id = f"{wg.slug(kid.name)}__{wg.slug(device.name)}"
-    conf_p = settings.state_dir / "wg-keys" / f"{peer_id}.conf"
-    img = qrcode.make(conf_p.read_text(), image_factory=qrcode.image.svg.SvgPathImage)
+    _, conf = _render_client_conf(ip)
+    img = qrcode.make(conf, image_factory=qrcode.image.svg.SvgPathImage)
     buf = io.BytesIO()
     img.save(buf)
     return Response(content=buf.getvalue(), media_type="image/svg+xml")

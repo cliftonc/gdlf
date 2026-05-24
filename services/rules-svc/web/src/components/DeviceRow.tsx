@@ -1,9 +1,16 @@
 import { useState } from "react";
 import { Button, Chip, Switch } from "@heroui/react";
 import { Link } from "@tanstack/react-router";
-import type { Device } from "../lib/schemas";
+import type { Device, MdmStatus } from "../lib/schemas";
 import { useConfirm } from "../lib/hooks/useConfirm";
 import { useDeleteDevice, useDeviceBlock, useRegenerateDevice } from "../lib/mutations";
+import { MdmDialog } from "./MdmDialog";
+
+function mdmChipColor(status: MdmStatus): "success" | "warning" | "danger" {
+  if (status === "enrolled") return "success";
+  if (status === "pending") return "warning";
+  return "danger"; // checked_out
+}
 
 function formatAgo(ts: number): string {
   if (!ts) return "never";
@@ -26,6 +33,7 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
   const block = useDeviceBlock(kidName);
   const regen = useRegenerateDevice(kidName);
   const [busy, setBusy] = useState(false);
+  const [mdmOpen, setMdmOpen] = useState(false);
 
   const onDelete = async () => {
     const ok = await confirm({
@@ -86,6 +94,11 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
               CA missing
             </Chip>
           )}
+          {device.mdm && (
+            <Chip size="sm" color={mdmChipColor(device.mdm.status)} variant="flat">
+              MDM: {device.mdm.status}
+            </Chip>
+          )}
         </div>
         <p className="text-xs text-default-500 mt-1 font-mono">
           {device.wg_ip} · last handshake {formatAgo(device.last_handshake)} ·{" "}
@@ -109,6 +122,16 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
         >
           Enrol
         </Button>
+        {device.platform === "ios" && (
+          <Button
+            size="sm"
+            variant="flat"
+            color={device.mdm?.status === "enrolled" ? "success" : "default"}
+            onPress={() => setMdmOpen(true)}
+          >
+            MDM
+          </Button>
+        )}
         <Button size="sm" variant="flat" onPress={onRegen} isDisabled={busy}>
           Rotate
         </Button>
@@ -116,6 +139,12 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
           Remove
         </Button>
       </div>
+      <MdmDialog
+        kidName={kidName}
+        device={device}
+        isOpen={mdmOpen}
+        onClose={() => setMdmOpen(false)}
+      />
     </div>
   );
 }

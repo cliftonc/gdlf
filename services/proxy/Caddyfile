@@ -1,0 +1,57 @@
+# gdlf MDM front-door.
+#
+# Public TLS (Let's Encrypt) for MDM_HOSTNAME, with optional client-cert
+# verification against the gdlf MDM CA. The cert details are forwarded to
+# rules-svc as headers; rules-svc enforces "must have valid client cert" on
+# the /mdm/checkin and /mdm/server paths.
+#
+# Routes:
+#   /mdm/scep, /mdm/enroll/* — reachable without a client cert (devices
+#                              don't have one until enrollment installs it).
+#   /mdm/checkin, /mdm/server — reachable, but rules-svc rejects with 401
+#                               unless X-Mdm-Client-Subject is set.
+#   anything else            — 404 (dashboard stays on its localhost port).
+
+{
+    email {$ACME_EMAIL}
+    # No port 80 binding — disable Caddy's auto HTTP→HTTPS redirect.
+    auto_https disable_redirects
+}
+
+# Listen on a custom port so Caddy doesn't collide with an upstream
+# reverse proxy that already owns 80/443 on the public hostname.
+# Upstream is expected to SNI-passthrough mdm.<domain>:443 to this port,
+# which also lets Let's Encrypt's TLS-ALPN-01 challenge reach us.
+https://{$MDM_HOSTNAME}:{$CADDY_HTTPS_PORT} {
+    # `verify_if_given` accepts requests with no client cert (used by SCEP
+    # + enrollment) and validates the cert against our MDM CA when one is
+    # presented (used by check-in + command polling).
+    tls {
+        # Cert source is selected at the compose level: the file mounted as
+        # /etc/caddy/issuer.conf comes from issuer.${CADDY_TLS_ISSUER}.conf
+        # in services/proxy/. `acme` (default) uses Let's Encrypt via DNS-01
+        # against Cloudflare; `internal` uses Caddy's local CA for testing.
+        import /etc/caddy/issuer.conf
+        client_auth {
+            mode verify_if_given
+            trust_pool file {
+                pem_file /etc/gdlf/mdm-ca/ca.pem
+            }
+        }
+    }
+
+    handle /mdm/* {
+        reverse_proxy rules-svc:8080 {
+            header_up X-Mdm-Client-Subject    {http.request.tls.client.subject}
+            # base64-DER (single line) — PEM has newlines that aren't legal
+            # HTTP header values. rules-svc base64-decodes back to DER and
+            # parses the cert chain itself.
+            header_up X-Mdm-Client-Cert-B64   {http.request.tls.client.certificate_der_base64}
+            header_up X-Forwarded-Proto       https
+        }
+    }
+
+    handle {
+        respond "not found" 404
+    }
+}

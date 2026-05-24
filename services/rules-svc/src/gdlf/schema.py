@@ -15,6 +15,33 @@ RuleAction = Literal["block", "allow", "flag"]
 DayKind = Literal["weekday", "weekend"]
 
 
+MdmStatus = Literal["pending", "enrolled", "checked_out"]
+
+
+class MdmState(BaseModel):
+    """Per-device MDM enrolment state. Absent until the device is enrolled
+    (or has a pending enrolment token outstanding).
+
+    `identity_cn` is the CommonName we put on the device's identity cert,
+    used to look the device back up on every /mdm/checkin and /mdm/server
+    request via the X-Mdm-Client-Subject header that Caddy forwards.
+
+    `udid` + `push_token` + `push_magic` are populated by Apple during the
+    initial Authenticate / TokenUpdate check-ins.
+    """
+    model_config = ConfigDict(extra="forbid")
+    identity_cn: str
+    identity_cert_serial: str  # hex; useful for revocation tracking later
+    status: MdmStatus = "pending"
+    udid: str | None = None
+    push_token: str | None = None       # base64 — used for APNs wakeups
+    push_magic: str | None = None
+    push_cert_topic: str | None = None  # com.apple.mgmt.External.<uuid> from APNs cert UID
+    supervised: bool = False
+    enrolled_at: datetime | None = None
+    last_checkin_at: datetime | None = None
+
+
 class Device(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -25,6 +52,8 @@ class Device(BaseModel):
     # Parent-toggled "off switch". When true, the nftables sidecar puts this
     # device's wg_ip into blocked_clients regardless of schedule.
     manual_block: bool = False
+    # Optional MDM enrolment state (Apple supervised devices only, currently).
+    mdm: MdmState | None = None
 
 
 class ScheduleWindow(BaseModel):
@@ -92,3 +121,10 @@ class KidsConfig(BaseModel):
 
     def all_devices(self) -> list[tuple[Kid, Device]]:
         return [(k, d) for k in self.kids for d in k.devices]
+
+    def device_by_mdm_identity(self, cn: str) -> tuple[Kid, Device] | None:
+        for k in self.kids:
+            for d in k.devices:
+                if d.mdm and d.mdm.identity_cn == cn:
+                    return k, d
+        return None

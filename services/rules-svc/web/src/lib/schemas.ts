@@ -14,6 +14,18 @@ export type Platform = z.infer<typeof PlatformEnum>;
 export const RuleActionEnum = z.enum(["block", "allow", "flag"]);
 export type RuleAction = z.infer<typeof RuleActionEnum>;
 
+export const MdmStatusEnum = z.enum(["pending", "enrolled", "checked_out"]);
+export type MdmStatus = z.infer<typeof MdmStatusEnum>;
+
+export const MdmStateSchema = z.object({
+  status: MdmStatusEnum,
+  udid: z.string().nullable(),
+  supervised: z.boolean(),
+  enrolled_at: z.string().nullable(),
+  last_checkin_at: z.string().nullable(),
+});
+export type MdmState = z.infer<typeof MdmStateSchema>;
+
 export const DeviceSchema = z.object({
   name: z.string(),
   platform: PlatformEnum,
@@ -25,8 +37,42 @@ export const DeviceSchema = z.object({
   rx: z.number(),
   tx: z.number(),
   online: z.boolean(),
+  // .nullish() accepts both null and undefined, so a stale cached JSON
+  // payload (pre-Phase-5 backend) doesn't break the dashboard.
+  mdm: MdmStateSchema.nullish(),
 });
 export type Device = z.infer<typeof DeviceSchema>;
+
+export const MdmEnrollTokenResponseSchema = z.object({
+  token: z.string(),
+  enroll_url: z.string(),
+  expires_at: z.string(),
+});
+export type MdmEnrollTokenResponse = z.infer<typeof MdmEnrollTokenResponseSchema>;
+
+export const MdmCommandRowSchema = z.object({
+  command_uuid: z.string(),
+  request_type: z.string(),
+  status: z.string(),
+  created_at: z.string(),
+  sent_at: z.string().nullable(),
+  completed_at: z.string().nullable(),
+});
+export type MdmCommandRow = z.infer<typeof MdmCommandRowSchema>;
+
+export const MdmResponseRowSchema = z.object({
+  command_uuid: z.string(),
+  status: z.string(),
+  ts: z.string(),
+  response_excerpt: z.string(),
+});
+export type MdmResponseRow = z.infer<typeof MdmResponseRowSchema>;
+
+export const MdmCommandsSchema = z.object({
+  queue: z.array(MdmCommandRowSchema),
+  responses: z.array(MdmResponseRowSchema),
+});
+export type MdmCommands = z.infer<typeof MdmCommandsSchema>;
 
 export const RuleSchema = z.object({
   action: RuleActionEnum,

@@ -274,6 +274,64 @@ export function useMoveRule(name: string) {
   });
 }
 
+// --- MDM mutations ---------------------------------------------------------
+
+export function useMdmEnrollToken(kidName: string) {
+  // Returns a fresh one-time enrolment URL for the device. We deliberately
+  // don't invalidate the kid query here — the dashboard renders the URL
+  // from the mutation result directly (it includes the random token).
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api<{ token: string; enroll_url: string; expires_at: string }>(
+        `/api/devices/${encodeURIComponent(ip)}/mdm/enroll-token`,
+        { method: "POST" }
+      ),
+    onSuccess: (_data, _ip) => {
+      // Force a kid refetch so the new pending mdm state shows up
+      void kidName;
+    },
+  });
+}
+
+export function useMdmInstallPolicy(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api(`/api/devices/${encodeURIComponent(ip)}/mdm/install-policy`, { method: "POST" }),
+    onSuccess: (_data, ip) => {
+      qc.invalidateQueries({ queryKey: qk.kid(kidName) });
+      qc.invalidateQueries({ queryKey: qk.mdmCommands(ip) });
+    },
+  });
+}
+
+export function useMdmPush(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api(`/api/devices/${encodeURIComponent(ip)}/mdm/push`, { method: "POST" }),
+    onSuccess: (_data, ip) => {
+      qc.invalidateQueries({ queryKey: qk.mdmCommands(ip) });
+      qc.invalidateQueries({ queryKey: qk.kid(kidName) });
+    },
+  });
+}
+
+export function useMdmEnqueueCommand(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ ip, request_type }: { ip: string; request_type: string }) =>
+      api<{ command_uuid: string; push_error: string | null }>(
+        `/api/devices/${encodeURIComponent(ip)}/mdm/command`,
+        { method: "POST", body: { request_type } }
+      ),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: qk.mdmCommands(vars.ip) });
+      qc.invalidateQueries({ queryKey: qk.kid(kidName) });
+    },
+  });
+}
+
 export function usePruneNow() {
   const qc = useQueryClient();
   return useMutation({

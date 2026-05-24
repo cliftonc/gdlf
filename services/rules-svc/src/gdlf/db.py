@@ -84,6 +84,47 @@ class AlertLog(SQLModel, table=True):
     detail: str | None = None
 
 
+class MdmEnrollToken(SQLModel, table=True):
+    """One-time token tying an enrolment URL to a specific device.
+
+    Issued by the dashboard, embedded in the URL the parent opens in
+    Safari / hands to Apple Configurator. Marked `used` on first fetch
+    of the .mobileconfig; expires after a short TTL regardless.
+    """
+    __tablename__ = "mdm_enroll_tokens"
+    token: str = Field(primary_key=True)            # random 32-byte urlsafe
+    wg_ip: str = Field(index=True)                  # device this token enrols
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime
+    used_at: datetime | None = None
+
+
+class MdmCommandQueue(SQLModel, table=True):
+    """Pending MDM commands per device. Phase 3 fills this in; Phase 2 just
+    creates the table so we don't need a second migration later."""
+    __tablename__ = "mdm_command_queue"
+    id: int | None = Field(default=None, primary_key=True)
+    identity_cn: str = Field(index=True)            # which device
+    command_uuid: str = Field(index=True)
+    request_type: str                                # InstallProfile, DeviceLock, etc.
+    payload: str                                     # plist XML (the inner command)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    sent_at: datetime | None = None
+    completed_at: datetime | None = None
+    status: str = "pending"                          # pending|sent|acknowledged|error
+
+
+class MdmCommandResponse(SQLModel, table=True):
+    """Device responses to MDM commands. Phase 3."""
+    __tablename__ = "mdm_command_responses"
+    id: int | None = Field(default=None, primary_key=True)
+    identity_cn: str = Field(index=True)
+    command_uuid: str = Field(index=True)
+    ts: datetime = Field(default_factory=datetime.utcnow)
+    status: str                                      # Acknowledged|Error|NotNow|CommandFormatError
+    response_plist: str | None = None                # full response body, for debugging
+
+
 _engine = None
 
 

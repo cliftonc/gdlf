@@ -26,6 +26,18 @@ def device_dto(d: Device, handshake: dict | None = None) -> dict[str, Any]:
         "rx": (handshake or {}).get("rx", 0),
         "tx": (handshake or {}).get("tx", 0),
         "online": _is_online(last),
+        "mdm": mdm_state_dto(d.mdm) if d.mdm else None,
+    }
+
+
+def mdm_state_dto(s) -> dict[str, Any]:
+    """Small projection of MdmState — only what the dashboard renders."""
+    return {
+        "status": s.status,
+        "udid": s.udid,
+        "supervised": s.supervised,
+        "enrolled_at": s.enrolled_at.isoformat() if s.enrolled_at else None,
+        "last_checkin_at": s.last_checkin_at.isoformat() if s.last_checkin_at else None,
     }
 
 

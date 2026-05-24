@@ -21,6 +21,12 @@ if [[ ! -f .env ]]; then
   fi
 fi
 
+# Auto-enable the `mdm` compose profile (which includes the Caddy front-door)
+# when MDM_HOSTNAME is set to a non-empty value in .env.
+if [[ -f .env ]] && grep -qE '^MDM_HOSTNAME=.+$' .env; then
+  COMPOSE="$COMPOSE --profile mdm"
+fi
+
 cmd="${1:-help}"
 shift || true
 
@@ -63,6 +69,255 @@ case "$cmd" in
     if [[ ! -d node_modules ]]; then npm install --legacy-peer-deps; fi
     GDLF_API_TARGET="http://localhost:${port}" npm run dev
     ;;
+  apns)
+    # Manage the Apple APNs MDM Push Certificate material (Phase 1 of the
+    # MDM build). The push cert is what lets the MDM server wake enrolled
+    # devices via api.push.apple.com.
+    #
+    # Two key pairs are involved:
+    #   push.{key,csr}        — becomes the eventual APNs cert (push.pem).
+    #                           push.key is kept forever; rotating it forces
+    #                           re-enrolment of every device.
+    #   encrypt.{key,pem}     — a self-signed RSA cert used ONLY to decrypt
+    #                           mdmcert.download's response email. Disposable
+    #                           after we have push.plist.b64.
+    sub="${1:-help}"; shift || true
+    APNS_DIR="config/state/apns"
+    APNS_KEY="$APNS_DIR/push.key"
+    APNS_CSR="$APNS_DIR/push.csr"
+    APNS_ENC_KEY="$APNS_DIR/encrypt.key"
+    APNS_ENC_PEM="$APNS_DIR/encrypt.pem"
+    APNS_PLIST="$APNS_DIR/push.plist.b64"
+    APNS_PEM="$APNS_DIR/push.pem"
+    # mdmcert.download requires this hardcoded shared key in every request.
+    # It's an abuse-prevention shared secret, not per-user auth — the real
+    # identifier is your registered email. Lifted from MicroMDM's mdmctl.
+    MDMCERT_API_KEY="f847aea2ba06b41264d587b229e2712c89b1490a1208b7ff1aafab5bb40d47bc"
+
+    case "$sub" in
+      csr)
+        # Generate both keypairs. Per-file idempotent: skips files that
+        # already exist (so you can re-run after partial generation without
+        # invalidating an already-issued cert).
+        mkdir -p "$APNS_DIR"
+        chmod 700 "$APNS_DIR"
+
+        if [[ -f "$APNS_KEY" || -f "$APNS_CSR" ]]; then
+          echo "skip push.{key,csr} — already present"
+        else
+          openssl req -new -newkey rsa:2048 -nodes \
+            -keyout "$APNS_KEY" \
+            -out "$APNS_CSR" \
+            -subj "/CN=gdlf MDM Push CSR/O=gdlf/C=US" \
+            >/dev/null 2>&1
+          chmod 600 "$APNS_KEY"
+          chmod 644 "$APNS_CSR"
+          echo "generated $APNS_KEY + $APNS_CSR"
+        fi
+
+        if [[ -f "$APNS_ENC_KEY" || -f "$APNS_ENC_PEM" ]]; then
+          echo "skip encrypt.{key,pem} — already present"
+        else
+          # Self-signed RSA cert, 365d. mdmcert.download encrypts the
+          # response email to this cert's public key.
+          openssl req -new -newkey rsa:2048 -nodes -x509 -days 365 \
+            -keyout "$APNS_ENC_KEY" \
+            -out "$APNS_ENC_PEM" \
+            -subj "/CN=mdmcert.download" \
+            >/dev/null 2>&1
+          chmod 600 "$APNS_ENC_KEY"
+          chmod 644 "$APNS_ENC_PEM"
+          echo "generated $APNS_ENC_KEY + $APNS_ENC_PEM"
+        fi
+
+        cat <<EOF
+
+Next: register at https://mdmcert.download/ (free) if you haven't, then:
+  ./gdlf apns submit <your-registered-email>
+EOF
+        ;;
+      submit)
+        # POST CSR + email + encryption cert to mdmcert.download/api/v1/signrequest.
+        # On success they email you an encrypted blob within minutes.
+        if [[ $# -ne 1 ]]; then
+          echo "Usage: ./gdlf apns submit <your-registered-email>" >&2
+          exit 2
+        fi
+        email="$1"
+        for f in "$APNS_CSR" "$APNS_ENC_PEM"; do
+          if [[ ! -f "$f" ]]; then
+            echo "missing: $f (run ./gdlf apns csr first)" >&2
+            exit 1
+          fi
+        done
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "this command needs jq (brew install jq)" >&2
+          exit 1
+        fi
+        csr_b64=$(base64 < "$APNS_CSR" | tr -d '\n')
+        enc_b64=$(base64 < "$APNS_ENC_PEM" | tr -d '\n')
+        payload=$(jq -n \
+          --arg csr "$csr_b64" \
+          --arg email "$email" \
+          --arg key "$MDMCERT_API_KEY" \
+          --arg encrypt "$enc_b64" \
+          '{csr:$csr,email:$email,key:$key,encrypt:$encrypt}')
+        echo "submitting to mdmcert.download (email=$email)…"
+        # User-Agent must be the whitelisted micromdm/certhelper string,
+        # otherwise the API rejects the request.
+        resp=$(curl -sS -X POST https://mdmcert.download/api/v1/signrequest \
+          -H 'Content-Type: application/json' \
+          -H 'User-Agent: micromdm/certhelper' \
+          --data "$payload")
+        echo "response: $resp"
+        if echo "$resp" | jq -e '.result == "success"' >/dev/null 2>&1; then
+          cat <<EOF
+
+Submitted. Check the inbox for $email — mdmcert.download will email an
+encrypted attachment within a few minutes. When it arrives:
+
+  ./gdlf apns decrypt ~/Downloads/mdm_signed_request.*.plist.b64.p7
+EOF
+        else
+          echo "submission did not return success — see response above" >&2
+          exit 1
+        fi
+        ;;
+      decrypt)
+        # Decrypt the emailed .plist.b64.p7 using the ENCRYPTION key
+        # (not the push key — different cert pair).
+        if [[ $# -ne 1 ]]; then
+          echo "Usage: ./gdlf apns decrypt <path-to-mdm_signed_request.*.plist.b64.p7>" >&2
+          exit 2
+        fi
+        input="$1"
+        if [[ ! -f "$input" ]]; then
+          echo "input file not found: $input" >&2
+          exit 1
+        fi
+        if [[ ! -f "$APNS_ENC_KEY" ]]; then
+          echo "encryption key missing: $APNS_ENC_KEY (run ./gdlf apns csr first)" >&2
+          exit 1
+        fi
+        if [[ -f "$APNS_PLIST" ]]; then
+          echo "output already exists: $APNS_PLIST — move or delete before re-running." >&2
+          exit 1
+        fi
+        # mdmcert.download's attachment is ASCII-hex-encoded PKCS7 DER bytes
+        # (not base64, despite the .b64 in the filename). Decode hex first,
+        # then S/MIME-decrypt with our encryption key. The plaintext output
+        # is the base64-encoded plist Apple's portal wants.
+        xxd -r -p "$input" \
+          | openssl smime -decrypt -inform DER \
+              -inkey "$APNS_ENC_KEY" \
+              -out "$APNS_PLIST"
+        chmod 644 "$APNS_PLIST"
+        cat <<EOF
+Decrypted signed plist written to: $APNS_PLIST
+
+Next:
+  Upload it to https://identity.apple.com/pushcert/ (sign in with your
+  Apple ID — your Developer ID works). Save Apple's returned .pem as
+  $APNS_PEM
+EOF
+        ;;
+      status)
+        echo "APNs material in $APNS_DIR:"
+        for f in "$APNS_KEY" "$APNS_CSR" "$APNS_ENC_KEY" "$APNS_ENC_PEM" "$APNS_PLIST" "$APNS_PEM"; do
+          if [[ -f "$f" ]]; then echo "  ok    $f"; else echo "  miss  $f"; fi
+        done
+        if [[ -f "$APNS_PEM" ]]; then
+          echo
+          echo "Push cert:"
+          openssl x509 -in "$APNS_PEM" -noout -subject -dates 2>/dev/null \
+            | sed 's/^/  /'
+        fi
+        ;;
+      help|-h|--help|"")
+        cat <<EOF
+gdlf apns — manage the Apple APNs MDM Push Certificate.
+
+  ./gdlf apns csr               generate the two RSA keypairs (push + encrypt)
+  ./gdlf apns submit <email>    POST CSR to mdmcert.download/api/v1/signrequest
+  ./gdlf apns decrypt <file>    decrypt the email mdmcert.download sends back
+  ./gdlf apns status            show which APNs files are present + cert expiry
+
+Full flow:
+  register at https://mdmcert.download/ -> csr -> submit -> (wait for email)
+  -> decrypt -> upload plist to https://identity.apple.com/pushcert/
+  -> save Apple's .pem as $APNS_PEM
+EOF
+        ;;
+      *)
+        echo "unknown apns subcommand: $sub" >&2
+        echo "try: ./gdlf apns help" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  mdm-ca)
+    # The gdlf MDM CA signs per-device identity certs that authenticate
+    # devices to the MDM server over mTLS. Separate from the mitmproxy CA
+    # (which is for HTTPS interception). Rotating this CA means re-enrolling
+    # every MDM-managed device, so it's long-lived (10y) and generated once.
+    sub="${1:-help}"; shift || true
+    CA_DIR="config/state/mdm-ca"
+    CA_KEY="$CA_DIR/ca.key"
+    CA_PEM="$CA_DIR/ca.pem"
+
+    case "$sub" in
+      init)
+        mkdir -p "$CA_DIR"
+        chmod 700 "$CA_DIR"
+        if [[ -f "$CA_KEY" || -f "$CA_PEM" ]]; then
+          echo "MDM CA already exists in $CA_DIR — refusing to overwrite." >&2
+          echo "Rotating the CA invalidates every enrolled device. If you really" >&2
+          echo "mean to, move the existing files aside first." >&2
+          exit 1
+        fi
+        # RSA 4096 for headroom + maximum client compat. 10y validity.
+        # Marked as a CA via x509v3 extensions (basicConstraints + keyUsage).
+        openssl req -new -newkey rsa:4096 -nodes -x509 -days 3650 \
+          -keyout "$CA_KEY" \
+          -out "$CA_PEM" \
+          -subj "/CN=gdlf MDM CA/O=gdlf" \
+          -addext "basicConstraints=critical,CA:TRUE" \
+          -addext "keyUsage=critical,keyCertSign,cRLSign" \
+          -addext "subjectKeyIdentifier=hash" \
+          >/dev/null 2>&1
+        chmod 600 "$CA_KEY"
+        chmod 644 "$CA_PEM"
+        echo "MDM CA generated:"
+        echo "  $CA_KEY  (0600 — never share, never commit)"
+        echo "  $CA_PEM"
+        ;;
+      status)
+        echo "MDM CA material in $CA_DIR:"
+        for f in "$CA_KEY" "$CA_PEM"; do
+          if [[ -f "$f" ]]; then echo "  ok    $f"; else echo "  miss  $f"; fi
+        done
+        if [[ -f "$CA_PEM" ]]; then
+          echo
+          echo "Cert:"
+          openssl x509 -in "$CA_PEM" -noout -subject -issuer -dates -fingerprint -sha256 2>/dev/null \
+            | sed 's/^/  /'
+        fi
+        ;;
+      help|-h|--help|"")
+        cat <<EOF
+gdlf mdm-ca — manage the gdlf MDM signing CA (issues per-device identity certs).
+
+  ./gdlf mdm-ca init       generate the CA (one-time; do NOT regenerate)
+  ./gdlf mdm-ca status     show CA presence, subject, validity, fingerprint
+EOF
+        ;;
+      *)
+        echo "unknown mdm-ca subcommand: $sub" >&2
+        echo "try: ./gdlf mdm-ca help" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   help|-h|--help|"")
     cat <<EOF
 gdlf — usage:
@@ -75,6 +330,8 @@ gdlf — usage:
   ./gdlf shell [svc]        shell into a container (default: rules-svc)
   ./gdlf rebuild [svc]      $COMPOSE build --no-cache + up
   ./gdlf web-dev            Vite dev server (HMR) proxying /api to the stack
+  ./gdlf apns ...           manage the Apple APNs MDM Push Certificate
+  ./gdlf mdm-ca ...         manage the gdlf MDM signing CA (device identity certs)
 
 Dashboard: http://localhost:\${DASHBOARD_PORT:-8080}
 EOF

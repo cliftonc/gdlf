@@ -112,6 +112,42 @@ services:
         hard: 65536
     depends_on: [wg]
 
+  caddy:
+    # TLS front-door for the MDM endpoints. Validates device client certs
+    # against the gdlf MDM CA (services/proxy/Caddyfile) and forwards cert
+    # details to rules-svc as headers.
+    #
+    # Caddy listens on CADDY_HTTPS_PORT (default 8081), NOT 443, so an
+    # upstream reverse proxy can SNI-passthrough mdm.<domain>:443 to this
+    # port. Let's Encrypt TLS-ALPN-01 challenges arrive via the same
+    # passthrough, so no port 80/443 binding is needed here.
+    build: ./services/proxy        # custom Caddy with cloudflare DNS plugin
+    container_name: gdlf-caddy
+    restart: unless-stopped
+    profiles: ["mdm"]
+    ports:
+      - "${CADDY_HTTPS_PORT:-8081}:${CADDY_HTTPS_PORT:-8081}"
+    volumes:
+      - ./services/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mount one of issuer.acme.conf or issuer.internal.conf as the
+      # active issuer, chosen by CADDY_TLS_ISSUER.
+      - ./services/proxy/issuer.${CADDY_TLS_ISSUER:-acme}.conf:/etc/caddy/issuer.conf:ro
+      - ./config/state/mdm-ca/ca.pem:/etc/gdlf/mdm-ca/ca.pem:ro
+      - ./config/state/caddy/data:/data         # Let's Encrypt cert + Caddy state
+      - ./config/state/caddy/config:/config
+    environment:
+      MDM_HOSTNAME: ${MDM_HOSTNAME:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      CADDY_HTTPS_PORT: ${CADDY_HTTPS_PORT:-8081}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+    networks: [gdlf]
+    # Docker's embedded resolver at 127.0.0.11 doesn't return SOA records,
+    # which breaks libdns's zone discovery for ACME DNS-01 challenges.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on: [rules-svc]
+
   rules-svc:
     build: ./services/rules-svc
     container_name: gdlf-rules
@@ -139,6 +175,9 @@ services:
       TZ: ${TZ}
       RETENTION_DAYS: ${RETENTION_DAYS:-7}
       MAX_EVENTS: ${MAX_EVENTS:-200000}
+      # MDM enrollment profiles need a public URL that devices can reach.
+      # e.g. https://gdlf.cliftonc.nl:8443  — empty disables /mdm/* endpoints.
+      MDM_BASE_URL: ${MDM_BASE_URL:-}
     volumes:
       - ./config/kids.yaml:/etc/gdlf/kids.yaml
       - ./config/wg:/etc/wireguard          # rules-svc writes wg0.conf here

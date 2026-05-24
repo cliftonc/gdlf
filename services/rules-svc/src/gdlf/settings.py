@@ -29,6 +29,9 @@ class Settings:
     # slower cadence to reclaim disk space.
     retention_days: int
     max_events: int
+    # Public origin of the MDM endpoints; embedded in enrollment profiles.
+    # e.g. "https://gdlf.cliftonc.nl:8443". Empty disables /mdm/* routes.
+    mdm_base_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,6 +55,7 @@ class Settings:
             tz=os.environ.get("TZ", "UTC"),
             retention_days=int(os.environ.get("RETENTION_DAYS") or 7),
             max_events=int(os.environ.get("MAX_EVENTS") or 200_000),
+            mdm_base_url=os.environ.get("MDM_BASE_URL", ""),
         )
 
 
