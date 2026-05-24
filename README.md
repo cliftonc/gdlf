@@ -18,6 +18,12 @@ enrol devices via QR, edit per-kid rules, view real-time activity, get
 push/email alerts on flagged events. `config/kids.yaml` is the
 declarative source of truth — UI edits and hand edits cooperate.
 
+For iOS and Android, optional **MDM enrolment** upgrades the guardrail
+into actual containment: always-on WireGuard the kid can't toggle,
+system-trusted mitmproxy CA (every app, not just browsers), and
+restrictions blocking the obvious bypass paths (add VPN, install
+profile, factory reset, uninstall the tunnel). See setup guides below.
+
 ## Layout
 
 ```
@@ -25,7 +31,10 @@ docker-compose.yml          # the stack (five services)
 gdlf                        # ./gdlf up | down | logs | rebuild | ...
 .env / .env.example         # WG_HOST, passwords, retention, SMTP, ...
 CLAUDE.md                   # architecture overview (start here)
-docs/design.md              # original design discussion
+docs/
+  design.md                 # original design discussion
+  setup-android-mdm.md      # parent walk-through: Android MDM (AMAPI)
+  setup-apple-mdm.md        # parent walk-through: Apple iOS MDM
 config/
   kids.example.yaml         # template committed to the repo
   kids.yaml                 # *** source of truth *** (gitignored — your real policy)
@@ -71,6 +80,25 @@ else breaks our DNS redirect.
    it in OS settings. After install, click "I've installed the CA" — the
    nftables reconciler will start routing :443 from that device through
    mitmproxy on its next cycle (~30s).
+
+### MDM (optional, stronger lockdown)
+
+The manual flow above is a guardrail — a determined kid can disable the
+VPN in Settings, refuse to trust the CA, or install another VPN that
+takes precedence. MDM closes those loopholes by enforcing the policy
+at the OS level on a supervised / device-owner phone:
+
+- **Android** — Google's Android Management API. ~15-minute one-time
+  setup, then scan a QR on a factory-reset phone. See
+  [docs/setup-android-mdm.md](docs/setup-android-mdm.md).
+- **iOS** — your own MDM server, fronted by Caddy mTLS. ~30-minute
+  one-time setup (APNs cert + signing CA + Cloudflare DNS-01), then
+  Apple Configurator 2 on a Mac with the phone cabled in. See
+  [docs/setup-apple-mdm.md](docs/setup-apple-mdm.md).
+
+Both paths require wiping the phone — Device Owner / supervised mode
+can only be set during initial provisioning. Devices you can't wipe
+fall back to the manual flow above.
 
 ## Adding rules
 
@@ -119,4 +147,6 @@ On a real Linux host this isn't an issue.
 
 - [`CLAUDE.md`](CLAUDE.md) — architecture overview, common-failure cheat sheet
 - [`docs/design.md`](docs/design.md) — original design discussion
+- [`docs/setup-android-mdm.md`](docs/setup-android-mdm.md) — Android MDM walk-through
+- [`docs/setup-apple-mdm.md`](docs/setup-apple-mdm.md) — iOS MDM walk-through
 - Per-service `CLAUDE.md` under `services/*/` and `nftables/`
