@@ -82,8 +82,8 @@ tunable via `RETENTION_DAYS` / `MAX_EVENTS`). Safe to wipe.
 
 ```
 docker-compose.yml          # the stack
-gdlf                        # ./gdlf up | logs | rebuild | ...
-.env                        # WG_HOST, passwords, retention, etc.
+gdlf                        # ./gdlf up | logs | rebuild | apns | mdm-ca | ...
+.env                        # WG_HOST, passwords, retention, MDM_*, etc.
 config/
   kids.example.yaml         # committed template — `./gdlf init` seeds kids.yaml from this
   kids.yaml                 # *** source of truth *** (gitignored)
@@ -91,6 +91,9 @@ config/
   adguard/                  # AdGuard runtime state
   mitmproxy/                # mitmproxy CA + state
   state/                    # rules-svc SQLite + key material
+    apns/                   # Apple Push cert (push.pem) + helpers (`./gdlf apns`)
+    mdm-ca/                 # signing CA for per-device MDM identity certs
+    caddy/                  # Caddy ACME + state (Let's Encrypt cert)
 nftables/                   # firewall sidecar (Alpine + nft + Python)
 scripts/
   gen-ca.sh                 # one-time mitmproxy CA generation
@@ -99,6 +102,7 @@ services/
   rules-svc/                # FastAPI dashboard + control plane (Python)
   mitmproxy/                # mitmproxy image + httpx
   blockpage/                # tiny dual-port block-page HTTP server
+  proxy/                    # Caddy TLS+mTLS front-door for the /mdm/* endpoints
 ```
 
 Each subdirectory has its own `CLAUDE.md` with the specifics.
@@ -112,7 +116,14 @@ Each subdirectory has its own `CLAUDE.md` with the specifics.
 ./gdlf logs [svc]  # follow logs
 ./gdlf rebuild     # full no-cache rebuild + recreate
 ./gdlf down        # stop
+
+# MDM (Apple iOS, optional — see services/rules-svc/CLAUDE.md and services/proxy/CLAUDE.md):
+./gdlf apns ...    # APNs MDM Push Cert workflow (csr → submit → decrypt)
+./gdlf mdm-ca ...  # gdlf MDM signing CA (issues per-device identity certs)
 ```
+
+`./gdlf up` automatically enables the `mdm` compose profile (which adds the
+Caddy front-door for /mdm/*) when `MDM_HOSTNAME` is set in `.env`.
 
 The `gdlf` script auto-detects either `docker compose` (plugin) or the
 standalone `docker-compose` binary.
@@ -135,7 +146,11 @@ standalone `docker-compose` binary.
 * **DoH/DoT bypass is not fought** — kids who actively want to escape can
   set Private DNS to `dns.google`. We could `nft drop` :853 outbound to
   force fallback, but the parent's threat model here is guardrail not
-  containment. (Easy to add later: see `nftables/reconcile.py`.)
+  containment. **EXCEPT** for iOS devices enrolled in MDM (see
+  `services/rules-svc/CLAUDE.md` § MDM): for those, the WireGuard tunnel
+  is always-on and non-removable, the CA is system-trusted, and adding
+  another VPN / profile is restricted at the OS level — so the guardrail
+  becomes containment for that platform.
 * **QUIC (UDP/443) is blocked for `mitm_clients`** so browsers fall back
   to TCP/TLS and mitmproxy can actually see traffic. Devices without the
   CA still get QUIC; we just can't inspect them beyond DNS / SNI.

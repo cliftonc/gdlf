@@ -29,6 +29,8 @@ isn't directly forwarding packets goes through here.
 | `api_rules.py`   | URL-rule CRUD, suggest, library reference.                            |
 | `api_activity.py`| Activity list + SSE stream.                                           |
 | `api_settings.py`| Settings + DB stats + prune-now.                                      |
+| `api_mdm.py`     | Apple iOS MDM: enrollment-token issuance, `.mobileconfig` serving, `/mdm/checkin`, `/mdm/server`, admin push + command endpoints. |
+| `mdm/`           | MDM internals (see § MDM below).                                       |
 | `dto.py`         | Shared projection from pydantic models to JSON DTOs.                  |
 | `pubsub.py`      | In-process publish/subscribe used by SSE.                             |
 | `schema.py`      | Pydantic v2 models for kids.yaml. Single source of contract.          |
@@ -112,6 +114,81 @@ isn't directly forwarding packets goes through here.
 * **Mitmproxy addon lives here, runs there.** `addons/mitm_capture.py` is
   mounted read-only into `gdlf-mitm` at `/addons/`. Edit here, rebuild
   the mitm container (or just `docker restart gdlf-mitm`).
+
+## MDM (Apple iOS, supervised)
+
+Opt-in feature that turns gdlf from a guardrail into actual containment for
+iOS devices. The flow is implemented natively (no NanoMDM dependency) and
+intentionally narrow — iOS only; macOS / Android / Windows are future work.
+
+### How a device gets enrolled
+
+1. **Setup (one time per appliance)**: APNs MDM Push Cert acquired via
+   `./gdlf apns {csr,submit,decrypt}` + `identity.apple.com/pushcert/`.
+   Signing CA generated via `./gdlf mdm-ca init`. See top-level CLAUDE.md
+   for `config/state/{apns,mdm-ca}/` layout.
+
+2. **Per-device enrolment**: dashboard `POST /api/devices/{ip}/mdm/enroll-token`
+   mints a one-time token → opens `/mdm/enroll/{token}` in Apple
+   Configurator 2 on a Mac. Configurator wipes + supervises + installs the
+   `.mobileconfig` we serve. The profile embeds a PKCS12 identity cert
+   (RSA 2048 signed by the gdlf MDM CA, 10-year validity) + an `com.apple.mdm`
+   payload pointing at our endpoints.
+
+3. **Steady state**: Apple sends Authenticate + TokenUpdate to /mdm/checkin
+   (mTLS-validated by Caddy, see `services/proxy/CLAUDE.md`). On the *first*
+   TokenUpdate, `mdm.orchestrator.deploy_baseline()` queues an InstallProfile
+   command bundling: WG always-on (com.wireguard.ios + OnDemand +
+   `OnDemandUserOverrideDisabled`), CA trust (com.apple.security.root,
+   auto-trusted because MDM-pushed), and Restrictions (no VPNCreation,
+   ProfileInstallation, EraseContentAndSettings). The whole profile is
+   `PayloadRemovalDisallowed`.
+
+4. **Pushes**: APNs HTTP/2 wakeups via `mdm.apns.send_push()` — device
+   pulls from /mdm/server, executes, posts back to /mdm/server. See
+   `mdm.commands` for the queue + response wiring.
+
+### Module map (`mdm/`)
+
+| File            | Responsibility                                                           |
+| --------------- | ------------------------------------------------------------------------ |
+| `identity.py`   | Mint per-device RSA cert + PKCS12 from the MDM CA. Cached CA load.       |
+| `enrollment.py` | Build the enrollment `.mobileconfig` (PKCS12 + MDM payload).             |
+| `apns.py`       | APNs topic extraction + HTTP/2 push client (mTLS using push.{pem,key}).  |
+| `commands.py`   | Command plist builders + SQLite-backed queue/response helpers.           |
+| `checkin.py`    | /mdm/checkin handlers (Authenticate / TokenUpdate / CheckOut).           |
+| `server.py`     | /mdm/server poll handler — record response, return next command.         |
+| `profiles.py`   | Policy payload builders (VPN / CA / Restrictions) + baseline composer.   |
+| `orchestrator.py` | Glue: build profile + enqueue InstallProfile + fire push.              |
+
+### Lookup model
+
+Devices identify themselves at the TLS layer via a cert with
+`CN=gdlf-device-<wg_ip>`. Caddy validates the chain and forwards
+`X-Mdm-Client-Subject` + `X-Mdm-Client-Cert-B64` to rules-svc.
+`schema.KidsConfig.device_by_mdm_identity(cn)` is the lookup helper.
+The `MdmState` sub-model on `Device` is persisted in kids.yaml alongside
+everything else.
+
+### Tables (db.py)
+
+* `mdm_enroll_tokens` — one-time enrollment URL tokens (30-min TTL).
+* `mdm_command_queue` — pending/sent/acknowledged/error commands per device.
+* `mdm_command_responses` — full plist response excerpts for the dashboard.
+
+### Gotchas
+
+* **PKCS12 password embedded plaintext** in the profile is intentional —
+  Apple decrypts at install time; the password is no more sensitive than
+  the profile itself.
+* **No SCEP** — cert rotation requires pushing a new profile via the
+  existing `InstallProfile` channel while the cert is still valid. With
+  10-year validity, this is effectively never.
+* **APNs cert is annual** — renew via identity.apple.com (the existing
+  `push.key` stays, only the cert refreshes). Should add a dashboard
+  banner at 30-days-to-expiry; not yet built.
+* **mTLS cert in the X-Mdm-Client-Cert-B64 header is base64-DER**, not
+  PEM — PEM has newlines which aren't legal in HTTP header values.
 
 ## Adding a new page
 

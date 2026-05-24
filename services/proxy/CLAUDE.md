@@ -1,0 +1,123 @@
+# proxy
+
+Caddy reverse proxy that fronts the `/mdm/*` endpoints of rules-svc.
+
+## Why it exists
+
+Apple MDM devices identify themselves via a TLS client certificate signed
+by our gdlf MDM CA. Validation has to happen at the TLS termination point —
+the upstream service can't request a client cert after the handshake is done.
+This container is that termination point.
+
+We also use it to obtain + auto-renew a public Let's Encrypt cert for the
+MDM hostname, so iOS devices see a chain they trust without any custom CA
+pinning on the device side.
+
+## How it's wired
+
+```
+   iPhone (mTLS handshake)
+        │
+        │  TCP 443 → user's home router → SNI-passthrough by upstream
+        │  proxy (nginx/NPM/etc) OR direct port-forward to ${MDM_HOSTNAME}
+        ▼  on a non-443 port (CADDY_HTTPS_PORT, default 8081)
+   ┌──────────────────────────────────────────────────────────┐
+   │  gdlf-caddy (custom build with caddy-dns/cloudflare)     │
+   │  • TLS termination — Let's Encrypt cert via DNS-01       │
+   │  • Validates X.509 client chain against /etc/gdlf/mdm-ca │
+   │  • Forwards subject + base64-DER to rules-svc as headers │
+   └──────────────────────────────────────────────────────────┘
+        │ HTTP to rules-svc:8080 on the gdlf bridge
+        ▼
+   rules-svc /mdm/{checkin,server,enroll/{token}}
+```
+
+## Files
+
+| File                    | Purpose                                                       |
+| ----------------------- | ------------------------------------------------------------- |
+| `Caddyfile`             | Site config — `verify_if_given` client cert against the MDM CA, route /mdm/* to rules-svc with headers. Listens on `https://{$MDM_HOSTNAME}:{$CADDY_HTTPS_PORT}`. |
+| `Dockerfile`            | Two-stage build using `caddy:2-builder` + `xcaddy` to bake in `github.com/caddy-dns/cloudflare`. The stock `caddy:2-alpine` doesn't include DNS provider plugins. |
+| `issuer.acme.conf`      | Mounted as `/etc/caddy/issuer.conf` when `CADDY_TLS_ISSUER=acme`. Tells Caddy to use ACME with DNS-01 via Cloudflare. |
+| `issuer.internal.conf`  | Mounted instead when `CADDY_TLS_ISSUER=internal`. Self-signed via Caddy's local CA — for setup/dev when external routing isn't ready. iOS will refuse it; do NOT use for real enrolment. |
+
+The `services/proxy/issuer.${CADDY_TLS_ISSUER:-acme}.conf` substitution
+happens in `docker-compose.yml`'s volume mount.
+
+## Why DNS-01 (not HTTP-01 or TLS-ALPN-01)
+
+* HTTP-01 needs port 80 reachable from the public internet, which is
+  typically taken by upstream nginx / a proxy manager.
+* TLS-ALPN-01 needs port 443, same problem.
+* DNS-01 only needs API access to the DNS provider — we use a Cloudflare
+  API token with `Zone:DNS:Edit` scoped to the gdlf zone.
+
+This is also why Caddy doesn't bind 80 or 443 by default — it listens
+on `CADDY_HTTPS_PORT` (default 8081) and expects upstream to deliver
+traffic there, either via SNI passthrough or a router port-forward.
+
+## Why mTLS is `verify_if_given`, not `require_and_verify`
+
+* `/mdm/scep` and `/mdm/enroll/{token}` are reached *before* the device
+  has any client cert (SCEP doesn't exist in our build, but the enroll
+  endpoint still needs to serve the profile unauthenticated).
+* `/mdm/checkin` and `/mdm/server` *do* require the cert; rules-svc
+  enforces this at the application layer by rejecting requests where
+  `X-Mdm-Client-Subject` is missing or doesn't resolve to a known device.
+
+This keeps the Caddy config a single site block instead of two.
+
+## Header contract
+
+| Request header          | Filled when client cert is presented (`verify_if_given`) |
+| ----------------------- | ---------------------------------------------------------- |
+| `X-Mdm-Client-Subject`  | The DN as a string, e.g. `CN=gdlf-device-10.13.13.5,O=gdlf`. rules-svc extracts the CN to look up `Device.mdm.identity_cn`. |
+| `X-Mdm-Client-Cert-B64` | Base64-DER of the full client cert. **Not** PEM — PEM has newlines that aren't legal in HTTP header values. rules-svc base64-decodes to parse. |
+| `X-Forwarded-Proto`     | Always `https`. |
+
+## Environment
+
+| Var                    | Required when            | Notes                                                  |
+| ---------------------- | ------------------------ | ------------------------------------------------------ |
+| `MDM_HOSTNAME`         | always (profile enabled) | Public hostname. Setting this also flips `./gdlf up` to auto-include the `mdm` compose profile. |
+| `ACME_EMAIL`           | `CADDY_TLS_ISSUER=acme`  | Let's Encrypt account email. |
+| `CADDY_HTTPS_PORT`     | always                   | Default 8081. Picked to dodge upstream-proxy collisions. |
+| `CADDY_TLS_ISSUER`     | always                   | `acme` (default) or `internal`. |
+| `CLOUDFLARE_API_TOKEN` | `CADDY_TLS_ISSUER=acme`  | `Zone:DNS:Edit` on the MDM zone. |
+
+## Docker DNS quirk
+
+The Caddyfile uses libdns-cloudflare under the hood. libdns determines the
+parent zone via a DNS SOA lookup, and Docker's embedded resolver
+(`127.0.0.11`) doesn't return SOA records. Compose pins this service to
+`1.1.1.1` + `8.8.8.8` via `dns:` to work around that.
+
+## Operating
+
+```
+# After MDM_HOSTNAME + ACME_EMAIL + CLOUDFLARE_API_TOKEN set in .env:
+./gdlf up -d caddy                       # bring up only this service
+docker logs gdlf-caddy 2>&1 | tail -50   # watch ACME issuance
+```
+
+External smoke test once routing is sorted:
+```
+curl -i https://${MDM_HOSTNAME}:${CADDY_HTTPS_PORT}/mdm/foo
+# → expect 404 from rules-svc (Caddy proxied through; no /mdm/foo route).
+#   Cert chain shown by openssl s_client should be Let's Encrypt E* → ISRG.
+```
+
+## Gotchas
+
+* **Build is slow first time** — `xcaddy build` compiles Caddy + the
+  Cloudflare plugin from source (~90s). Subsequent builds are cached.
+* **Switching `CADDY_TLS_ISSUER` requires `up -d`, not `restart`** — the
+  mounted `issuer.conf` symlink changes which file is bound; restart
+  alone doesn't re-evaluate the volume mount.
+* **Rate limits**: Let's Encrypt allows 5 failed authorizations per
+  hostname per hour. If routing isn't ready, flip to
+  `CADDY_TLS_ISSUER=internal` *before* bringing Caddy up — repeated ACME
+  failures will lock you out for the rest of the hour.
+* **Header-stuffing**: the `X-Mdm-Client-*` headers are set by Caddy from
+  TLS state. They override any same-named headers in the inbound request,
+  so devices can't spoof identity by sending the headers themselves.
