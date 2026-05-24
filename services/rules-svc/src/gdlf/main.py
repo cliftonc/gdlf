@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import io
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -30,7 +30,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import adguard, alerts, db, store, wg
+from . import adguard, alerts, auth, db, store, wg
 from .rules import evaluate
 from .schema import Device, Kid, URLRule
 from .settings import settings
@@ -105,7 +105,9 @@ templates.env.globals["css_v"] = _css_v
 def _ctx(**extra) -> dict:
     cfg = store.load()
     handshakes = wg.wg_show_handshakes()
-    return {"cfg": cfg, "handshakes": handshakes, "now": datetime.utcnow(), **extra}
+    # `now` is the container's local time (TZ env honoured) so schedule /
+    # bonus comparisons in templates match what the nftables sidecar sees.
+    return {"cfg": cfg, "handshakes": handshakes, "now": datetime.now(), **extra}
 
 
 def _render(request: Request, name: str, **extra) -> HTMLResponse:
@@ -118,6 +120,72 @@ def _kid_or_404(name: str) -> Kid:
     if not kid:
         raise HTTPException(404, f"unknown kid {name}")
     return kid
+
+
+# ---------------------------------------------------------------------------
+# Auth: cookie-checked middleware. Public paths bypass it (mitmproxy API,
+# health, CA download for the kid's device, the login page itself, static).
+#
+# When RULES_SVC_ADMIN_PASSWORD is empty, auth is disabled — first-boot &
+# dev convenience.
+
+_PUBLIC_PATHS = {"/login", "/logout", "/healthz", "/ca.pem", "/ca/qr"}
+_PUBLIC_PREFIXES = ("/static/", "/api/")
+
+
+def _is_public(path: str) -> bool:
+    return path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+
+
+@app.middleware("http")
+async def require_auth(request: Request, call_next):
+    if not settings.admin_password:
+        return await call_next(request)
+    if _is_public(request.url.path):
+        return await call_next(request)
+    if auth.check_token(request.cookies.get(auth.COOKIE)):
+        return await call_next(request)
+    # Preserve the requested URL so we can bounce back after login.
+    nxt = request.url.path
+    if request.url.query:
+        nxt += "?" + request.url.query
+    return RedirectResponse(f"/login?next={nxt}", status_code=303)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(request: Request, next: str = "/kids", error: str = ""):
+    # Render directly — _render() expects kids.yaml context we don't need here.
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"next": next, "error": error, "now": datetime.utcnow()},
+    )
+
+
+@app.post("/login")
+def login_submit(password: str = Form(...), next: str = Form("/kids")):
+    if not auth.check_password(password):
+        return RedirectResponse(f"/login?next={next}&error=1", status_code=303)
+    # Sanitize redirect: only allow same-origin paths.
+    if not next.startswith("/") or next.startswith("//"):
+        next = "/kids"
+    resp = RedirectResponse(next, status_code=303)
+    resp.set_cookie(
+        auth.COOKIE,
+        auth.make_token(),
+        max_age=auth.MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return resp
+
+
+@app.post("/logout")
+def logout():
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(auth.COOKIE, path="/")
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +236,100 @@ def kids_create(
 def kid_detail(request: Request, name: str, tab: str = "devices"):
     kid = _kid_or_404(name)
     return _render(request, "kid_detail.html", kid=kid, tab=tab)
+
+
+@app.post("/kids/{name}/schedule")
+def kid_schedule_update(
+    name: str,
+    schedule_weekday: str = Form(...),
+    schedule_weekend: str = Form(...),
+):
+    """Update a kid's allowed-hours windows. The nftables sidecar picks the
+    new schedule up on its next reconcile cycle (~30s)."""
+    from .schema import Schedule, ScheduleWindow
+
+    # Validate format up front so a typo doesn't poison kids.yaml.
+    try:
+        Schedule(
+            weekday=ScheduleWindow(allowed=schedule_weekday.strip()),
+            weekend=ScheduleWindow(allowed=schedule_weekend.strip()),
+        )
+    except Exception as e:
+        raise HTTPException(400, f"invalid schedule: {e}")
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.schedule.weekday.allowed = schedule_weekday.strip()
+        kid.schedule.weekend.allowed = schedule_weekend.strip()
+
+    store.mutate(upd)
+    return RedirectResponse(f"/kids/{name}?tab=schedule", status_code=303)
+
+
+@app.post("/kids/{name}/bonus")
+def kid_bonus(name: str, minutes: int = Form(...)):
+    """Grant bonus time: extend the allowed window by `minutes` from now.
+    Repeated calls extend cumulatively from whichever is later (current
+    bonus_until or now)."""
+    if minutes <= 0 or minutes > 24 * 60:
+        raise HTTPException(400, "minutes must be 1..1440")
+
+    def add(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        now = datetime.now()  # naive local — matches nftables sidecar TZ
+        base = kid.bonus_until if kid.bonus_until and kid.bonus_until > now else now
+        kid.bonus_until = base + timedelta(minutes=minutes)
+
+    store.mutate(add)
+    return RedirectResponse(f"/kids/{name}?tab=schedule", status_code=303)
+
+
+@app.post("/kids/{name}/bonus/clear")
+def kid_bonus_clear(name: str):
+    def clr(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.bonus_until = None
+
+    store.mutate(clr)
+    return RedirectResponse(f"/kids/{name}?tab=schedule", status_code=303)
+
+
+@app.post("/kids/{name}/block")
+def kid_block(name: str, blocked: bool = Form(True)):
+    """Toggle the kid-wide manual block — all their devices go offline."""
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.manual_block = bool(blocked)
+
+    store.mutate(upd)
+    return RedirectResponse(f"/kids/{name}", status_code=303)
+
+
+@app.post("/devices/{ip}/block")
+def device_block(ip: str, blocked: bool = Form(True)):
+    """Toggle the per-device manual block. nftables picks it up next cycle."""
+    cfg = store.load(force=True)
+    found = cfg.device_by_ip(ip)
+    if not found:
+        raise HTTPException(404, "unknown device")
+    kid_name = found[0].name
+
+    def upd(cfg):
+        for k in cfg.kids:
+            for d in k.devices:
+                if d.wg_ip == ip:
+                    d.manual_block = bool(blocked)
+
+    store.mutate(upd)
+    return RedirectResponse(f"/kids/{kid_name}", status_code=303)
 
 
 @app.post("/kids/{name}/delete")
@@ -579,6 +741,49 @@ async def post_event(request: Request):
     return JSONResponse({"ok": True})
 
 
+def _network_block_reason(kid, device) -> str | None:
+    """Return a short reason string when network access should be denied
+    independent of URL rules — manual kid/device toggle, or out-of-schedule
+    (unless bonus is active). Mirrors nftables/reconcile.py so the block
+    page and the firewall stay in sync. None = no block reason."""
+    if kid.manual_block:
+        return "kid manually blocked"
+    if device.manual_block:
+        return "device manually blocked"
+
+    now = datetime.now()
+    bonus = kid.bonus_until
+    if bonus is not None and bonus > now:
+        return None  # bonus time overrides schedule
+
+    window = kid.schedule.weekend if now.weekday() >= 5 else kid.schedule.weekday
+    if not _in_any_window(now, window.allowed):
+        return "outside allowed hours"
+    return None
+
+
+def _in_any_window(now, spec: str) -> bool:
+    """'07:00-21:00,22:00-23:00' → True if `now` falls in any window."""
+    import re
+    mins = now.hour * 60 + now.minute
+    for chunk in (spec or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})", chunk)
+        if not m:
+            continue
+        a = int(m.group(1)) * 60 + int(m.group(2))
+        b = int(m.group(3)) * 60 + int(m.group(4))
+        if a <= b:
+            if a <= mins < b:
+                return True
+        else:
+            if mins >= a or mins < b:
+                return True
+    return False
+
+
 @app.post("/api/decision")
 async def post_decision(request: Request):
     """mitmproxy asks: 'for this request, what should I do?'
@@ -592,7 +797,22 @@ async def post_decision(request: Request):
     if not found:
         # Unknown client — let it through, mark as unmapped.
         return JSONResponse({"action": "allow", "kid": None, "rule": None, "flag": False})
-    kid, _device = found
+    kid, device = found
+
+    # Schedule / manual blocks first — they trump URL rules. mitmproxy will
+    # serve the block page over HTTPS for these.
+    reason = _network_block_reason(kid, device)
+    if reason:
+        return JSONResponse(
+            {
+                "action": "block",
+                "kid": kid.name,
+                "kid_age": kid.age,
+                "rule": reason,
+                "flag": False,
+            }
+        )
+
     decision = evaluate(kid, payload.get("host", ""), payload.get("path", "/"), payload.get("query"))
     return JSONResponse(
         {

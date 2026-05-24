@@ -1,6 +1,6 @@
 FROM alpine:3.20
 
-RUN apk add --no-cache nftables python3 py3-yaml tzdata bash iproute2
+RUN apk add --no-cache nftables python3 py3-yaml tzdata bash iproute2 conntrack-tools
 
 COPY reconcile.py /usr/local/bin/reconcile.py
 RUN chmod +x /usr/local/bin/reconcile.py

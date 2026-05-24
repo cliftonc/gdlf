@@ -19,7 +19,10 @@
   <a href="/rules" {% if nav == 'rules' %}class="active"{% endif %}>Rules</a>
   <a href="/settings" {% if nav == 'settings' %}class="active"{% endif %}>Settings</a>
   <span class="spacer"></span>
-  <span class="muted">{{ now.strftime('%H:%M UTC') }}</span>
+  <span class="muted">{{ now.strftime('%H:%M') }}</span>
+  <form method="post" action="/logout" style="margin:0;">
+    <button type="submit" class="secondary" style="padding:4px 10px;font-size:12px;">Sign out</button>
+  </form>
 </nav>
 <main class="container {% if wide %}container-wide{% endif %}">
   {% block content %}{% endblock %}

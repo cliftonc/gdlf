@@ -82,21 +82,48 @@ def load_kids() -> dict:
     return yaml.safe_load(KIDS_YAML.read_text()) or {"kids": []}
 
 
+def _parse_bonus(v) -> _dt.datetime | None:
+    """kids.yaml may carry bonus_until as a native YAML timestamp (pyyaml
+    returns datetime) or as an ISO-8601 string (depending on writer). Both
+    are accepted; anything else is ignored."""
+    if v is None:
+        return None
+    if isinstance(v, _dt.datetime):
+        return v
+    if isinstance(v, str):
+        try:
+            return _dt.datetime.fromisoformat(v)
+        except ValueError:
+            return None
+    return None
+
+
 def render(cfg: dict, now: _dt.datetime) -> str:
     blocked_ips: list[str] = []
     mitm_ips: list[str] = []
     for kid in cfg.get("kids", []) or []:
+        kid_blocked = bool(kid.get("manual_block"))
+        bonus_until = _parse_bonus(kid.get("bonus_until"))
+        bonus_active = bonus_until is not None and bonus_until > now
+
         sched = (kid.get("schedule") or {})
         which = "weekend" if is_weekend(now.date()) else "weekday"
         allowed = (sched.get(which) or {}).get("allowed", "00:00-23:59")
         windows = parse_windows(allowed)
-        out_of_window = not in_window(now, windows)
+        # Bonus suspends schedule-based blocking. Manual blocks (kid-wide or
+        # per-device) always win, regardless of bonus.
+        out_of_window = (not in_window(now, windows)) and not bonus_active
+
         for d in kid.get("devices", []) or []:
             ip = d.get("wg_ip")
             if not ip:
                 continue
-            if out_of_window:
+            if kid_blocked or d.get("manual_block") or out_of_window:
                 blocked_ips.append(ip)
+            # Blocked devices stay in mitm_clients on purpose: mitmproxy will
+            # serve our block page over HTTPS for them (see /api/decision).
+            # Devices WITHOUT the CA can't see that page, so the forward chain
+            # rejects 443 for `blocked AND NOT mitm` instead — see render().
             if d.get("mitm_ca_installed"):
                 mitm_ips.append(ip)
 
@@ -137,8 +164,11 @@ def render(cfg: dict, now: _dt.datetime) -> str:
         "    chain forward {",
         "        type filter hook forward priority 0; policy accept;",
         # Blocked clients: HTTPS gets a fast TCP reset (browser fails in ms
-        # instead of timing out); all other ports get dropped.
-        "        iifname \"wg0\" ip saddr @blocked_clients tcp dport 443 reject with tcp reset",
+        # instead of timing out); all other ports get dropped. We skip the
+        # 443 reject for mitm-CA devices because their HTTPS is DNATed in
+        # prerouting → mitmproxy, which serves a real block page (much nicer
+        # UX than "Connection refused").
+        "        iifname \"wg0\" ip saddr @blocked_clients ip saddr != @mitm_clients tcp dport 443 reject with tcp reset",
         "        iifname \"wg0\" ip saddr @blocked_clients tcp dport != 80 drop",
         "        iifname \"wg0\" ip saddr @blocked_clients meta l4proto udp drop",
         # Force devices with the CA installed off QUIC (HTTP/3) onto TCP/TLS,
@@ -169,19 +199,62 @@ def apply(ruleset: str) -> None:
         print(f"[gdlf-nft] nft failed:\n{proc.stderr}\n--- ruleset ---\n{ruleset}", file=sys.stderr)
 
 
+def collect_blocked(cfg: dict, now: _dt.datetime) -> set[str]:
+    """Same logic as render() — recomputed cheaply so we can diff cycles."""
+    out: set[str] = set()
+    for kid in cfg.get("kids", []) or []:
+        kid_blocked = bool(kid.get("manual_block"))
+        bonus_until = _parse_bonus(kid.get("bonus_until"))
+        bonus_active = bonus_until is not None and bonus_until > now
+        sched = (kid.get("schedule") or {})
+        which = "weekend" if is_weekend(now.date()) else "weekday"
+        allowed = (sched.get(which) or {}).get("allowed", "00:00-23:59")
+        out_of_window = (not in_window(now, parse_windows(allowed))) and not bonus_active
+        for d in kid.get("devices", []) or []:
+            ip = d.get("wg_ip")
+            if not ip:
+                continue
+            if kid_blocked or d.get("manual_block") or out_of_window:
+                out.add(ip)
+    return out
+
+
+def flush_conntrack(ip: str) -> None:
+    """Kill existing flows so a newly-blocked device loses its open streams
+    immediately, not whenever conntrack idles them out. Without this, an
+    already-loaded YouTube tab would keep playing for minutes after a block."""
+    # Two passes: as source (kid → internet) and as the post-DNAT destination
+    # (return packets entering loopback from mitm/blockpage targets).
+    for flag in ("-s", "-d"):
+        subprocess.run(
+            ["conntrack", "-D", flag, ip],
+            capture_output=True, text=True,
+        )
+
+
 def main() -> int:
     print(f"[gdlf-nft] starting. kids={KIDS_YAML} adguard={ADGUARD_IP} mitm={MITM_IP} interval={INTERVAL}s")
     last_hash = None
+    last_blocked: set[str] = set()
     while True:
         try:
             cfg = load_kids()
             now = now_local()
             ruleset = render(cfg, now)
+            blocked = collect_blocked(cfg, now)
             h = hash(ruleset)
             if h != last_hash:
                 apply(ruleset)
+                # Flush conntrack for IPs that newly entered the blocked set
+                # — established TCP sessions otherwise dodge the new rules.
+                newly_blocked = blocked - last_blocked
+                for ip in newly_blocked:
+                    flush_conntrack(ip)
+                if newly_blocked:
+                    print(f"[gdlf-nft] flushed conntrack for {sorted(newly_blocked)}")
                 print(f"[gdlf-nft] reconciled at {now.isoformat()}")
                 last_hash = h
+                last_blocked = blocked
         except Exception as e:
             print(f"[gdlf-nft] error: {e}", file=sys.stderr)
         time.sleep(INTERVAL)

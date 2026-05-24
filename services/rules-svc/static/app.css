@@ -79,7 +79,7 @@ button.secondary, .btn.secondary { background: var(--panel-2); color: var(--fg);
 button.danger, .btn.danger { background: var(--danger); }
 button:hover { filter: brightness(1.1); }
 
-input[type=text], input[type=number], input[type=email], input[type=url], select, textarea {
+input[type=text], input[type=number], input[type=email], input[type=url], input[type=password], select, textarea {
   background: var(--panel-2); color: var(--fg);
   border: 1px solid var(--line); border-radius: 6px;
   padding: 8px 10px; font-size: 13px; font-family: inherit;

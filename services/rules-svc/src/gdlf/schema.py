@@ -5,6 +5,7 @@ nftables reconciler, the AdGuard sync loop, and the mitmproxy addon.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,6 +22,9 @@ class Device(BaseModel):
     wg_ip: str
     wg_public_key: str | None = None
     mitm_ca_installed: bool = False
+    # Parent-toggled "off switch". When true, the nftables sidecar puts this
+    # device's wg_ip into blocked_clients regardless of schedule.
+    manual_block: bool = False
 
 
 class ScheduleWindow(BaseModel):
@@ -58,6 +62,12 @@ class Kid(BaseModel):
     blocked_apps: list[str] = []
     url_rules: list[URLRule] = []
     keyword_flags: list[str] = []
+    # If set and in the future (local time), schedule-based blocks are
+    # suspended until this moment — i.e. "bonus time" beyond normal hours.
+    bonus_until: datetime | None = None
+    # Parent-toggled "off switch" for the whole kid. When true, every one of
+    # their devices is added to nftables' blocked_clients (overrides bonus).
+    manual_block: bool = False
 
 
 class Blocklist(BaseModel):
