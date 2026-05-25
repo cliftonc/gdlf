@@ -741,7 +741,9 @@ export function EnrolView({
         <CardHeader className="flex flex-col items-start gap-1">
           <p className="text-sm font-semibold">Step 3 · Install the inspection certificate</p>
           <p className="text-xs text-default-500">
-            Lets gdlf see HTTPS hostnames + paths for URL rules. Without it, only DNS-level filtering works.
+            Required for URL-path rules. Even with the CA trusted, gdlf splices
+            (forwards TLS untouched) for every host except the ones you add to
+            the kid's Inspect list — pinned apps Just Work.
           </p>
         </CardHeader>
         <CardBody className="flex flex-col gap-3">

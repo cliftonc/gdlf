@@ -8,8 +8,11 @@ A self-hosted parental-control appliance. Kids' devices connect over
 WireGuard 24/7 and their traffic is filtered at three levels:
 
 - **AdGuard** — DNS blocking (categories, custom lists, parental filter)
-- **mitmproxy** — URL-path-level allow / block / flag rules (HTTPS, on
-  devices that have the CA installed)
+- **mitmproxy** — URL-path-level allow / block / flag rules. **Splice by
+  default, MITM only for hosts the parent has explicitly opted into
+  inspection** (per-kid `mitm_inspect_hosts` plus a small global list of
+  bulk video CDNs). Everything else is forwarded TLS-untouched, so
+  pinned-cert apps Just Work.
 - **nftables** — per-device schedule enforcement (out of hours = blocked)
   with friendly "you shall not pass" pages for HTTP, fast TCP-RST for HTTPS
 
@@ -78,11 +81,14 @@ dashboard's **Settings** page; AdGuard's own UI is on
    appears with the WireGuard QR.
 3. Scan the QR in the WireGuard app on the device. Toggle the tunnel on.
    The wizard auto-advances when it sees the first handshake.
-4. Optional (highly recommended for URL-level rules): scan the **CA QR**
-   on the same page to download `gdlf-ca.pem` to the device, then trust
-   it in OS settings. After install, click "I've installed the CA" — the
-   nftables reconciler will start routing :443 from that device through
-   mitmproxy on its next cycle (~30s).
+4. Optional (only needed if you plan to write URL-path rules for this kid):
+   scan the **CA QR** on the same page to download `gdlf-ca.pem` to the
+   device, then trust it in OS settings. After install, click "I've
+   installed the CA" — the nftables reconciler routes :443 from that
+   device through mitmproxy on its next cycle (~30s). Even with the CA
+   trusted, mitmproxy *splices* (forwards TLS untouched) for every host
+   except the ones on the kid's **Inspect** list — so pinned apps stay
+   functional and the CA is only "used" on hosts you've opted in.
 
 ### MDM (optional, stronger lockdown)
 
@@ -114,9 +120,14 @@ fall back to the manual flow above.
 - **Domain blocking** (every device) — done in AdGuard's UI (Filters →
   DNS blocklists). To get the friendly block page instead of "site not
   found", set AdGuard's Blocking Mode → Custom IP → `10.13.13.254`.
-- **URL-path rules** (per kid, requires CA installed on device) — Kid
-  detail → Rules tab → "Add rule", or click "+ rule" on any Activity row
-  to pre-fill from an observed request.
+- **URL-path rules** (per kid) — Kid detail → Rules tab → "Add rule", or
+  click "+ rule" on any Activity row to pre-fill from an observed request.
+  Two prerequisites: the device must trust the gdlf CA, **and** the host
+  must be on the kid's **Inspect** list (Kid detail → Passthrough tab →
+  Inspect). Until both are true, mitmproxy splices the connection and
+  URL-path rules can't fire — only the SNI is visible. Adding a host to
+  Inspect breaks any pinned app on that host; the dashboard surfaces
+  TLS-failure events so you can spot and remove regressions.
 - **Schedules** — Kid detail → Schedule tab (or edit `kids.yaml` directly
   — both stay in sync).
 
