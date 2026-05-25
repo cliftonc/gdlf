@@ -24,8 +24,8 @@ import plistlib
 import uuid
 from pathlib import Path
 
-from .. import wg
-from ..schema import Device, Kid
+from .. import browsers, store, wg
+from ..schema import ChromeManagedConfig, Device, IosBrowserPolicy, Kid
 from ..settings import settings
 
 ORG = "gdlf"
@@ -106,7 +106,7 @@ def ca_trust_payload(*, ca_der: bytes, common_name: str = "gdlf CA") -> dict:
     }
 
 
-def restrictions_payload() -> dict:
+def restrictions_payload(ios_policy: IosBrowserPolicy) -> dict:
     """Lock down the loopholes a determined kid would otherwise find:
 
       * allowVPNCreation=False — can't add a non-gdlf VPN that would
@@ -115,6 +115,11 @@ def restrictions_payload() -> dict:
         custom profile that overrides our restrictions.
       * allowEraseContentAndSettings=False — can't factory-reset to
         escape the enrollment.
+      * allowSafari controlled by browser policy: Safari is removed
+        from the device unless the parent explicitly chose it as the
+        allowed browser.
+      * blacklistedAppBundleIDs blocks every other known browser so the
+        kid can't sideload a Chromium fork with its own DoH.
 
     Everything else stays default-allowed. We're a guardrail, not a
     lockdown appliance — kids should still be able to use their phones.
@@ -130,6 +135,30 @@ def restrictions_payload() -> dict:
         "allowVPNCreation": False,
         "allowProfileInstallation": False,
         "allowEraseContentAndSettings": False,
+        "allowSafari": ios_policy.allowed_browser == "safari",
+        "blacklistedAppBundleIDs": browsers.ios_blocklist(ios_policy),
+    }
+
+
+def chrome_appconfig_payload(cfg: ChromeManagedConfig, bundle_id: str) -> dict:
+    """App Configuration payload bound to whichever Chromium-based iOS
+    browser the parent allowed. Disables Incognito / Sync / Sign-in per
+    the global ChromeManagedConfig toggles.
+
+    PayloadType `com.apple.app.managed` is the App Configuration payload
+    (iOS 7+); Chromium browsers read the dict at `Configuration` using
+    the standard Chrome enterprise policy keys.
+    """
+    return {
+        "PayloadType": "com.apple.app.managed",
+        "PayloadVersion": 1,
+        "PayloadUUID": str(uuid.uuid4()).upper(),
+        "PayloadIdentifier": "nl.cliftonc.gdlf.payload.browser.appconfig",
+        "PayloadDisplayName": "gdlf Browser Managed Config",
+        "PayloadDescription": "Disables Incognito / Sync / Sign-in in the allowed browser.",
+        "PayloadOrganization": ORG,
+        "BundleID": bundle_id,
+        "Configuration": browsers.chrome_cfg_dict(cfg),
     }
 
 
@@ -160,11 +189,15 @@ def build_baseline_policy(*, kid: Kid, device: Device) -> bytes:
     priv = wg.load_peer_priv(peer_id)
     wg_conf = wg.build_client_conf(device.name, priv, device.wg_ip)
 
+    policy = store.load().browser_policy
     payloads = [
         vpn_payload(wg_quick_conf=wg_conf),
         ca_trust_payload(ca_der=_load_mitm_ca_der()),
-        restrictions_payload(),
+        restrictions_payload(policy.ios),
     ]
+    chrome_bundle_id = browsers.ios_allowed_bundle_id(policy.ios)
+    if chrome_bundle_id is not None:
+        payloads.append(chrome_appconfig_payload(policy.chrome_managed_config, chrome_bundle_id))
 
     profile = {
         "PayloadType": "Configuration",

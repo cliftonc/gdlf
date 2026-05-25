@@ -9,8 +9,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from . import db, wg
-from .schema import Device, Kid
+from . import browsers, db, wg
+from .schema import BrowserPolicy, Device, Kid
 
 
 def device_dto(d: Device, handshake: dict | None = None) -> dict[str, Any]:
@@ -131,6 +131,35 @@ def kid_detail_dto(k: Kid, handshakes: dict[str, dict]) -> dict[str, Any]:
         "mitm_passthrough_disabled": list(k.mitm_passthrough_disabled),
         "devices": [device_dto(d, handshakes.get(d.wg_ip)) for d in k.devices],
         "rules": [rule_dto(r) for r in k.url_rules],
+    }
+
+
+def browser_policy_dto(p: BrowserPolicy) -> dict[str, Any]:
+    """Round-trippable JSON shape of the BrowserPolicy block. Mirrored in
+    web/src/lib/schemas.ts as `BrowserPolicySchema`."""
+    return {
+        "ios": {
+            "allowed_browser": p.ios.allowed_browser,
+            "extra_blocked": list(p.ios.extra_blocked),
+            "unblocked": list(p.ios.unblocked),
+        },
+        "android": {
+            "allowed_browser": p.android.allowed_browser,
+            "extra_blocked": list(p.android.extra_blocked),
+            "unblocked": list(p.android.unblocked),
+        },
+        "chrome_managed_config": {
+            "incognito_disabled": p.chrome_managed_config.incognito_disabled,
+            "sync_disabled": p.chrome_managed_config.sync_disabled,
+            "signin_disabled": p.chrome_managed_config.signin_disabled,
+            "search_suggest_enabled": p.chrome_managed_config.search_suggest_enabled,
+        },
+        "effective": {
+            "ios_blocklist": browsers.ios_blocklist(p.ios),
+            "android_blocklist": browsers.android_blocklist(p.android),
+            "ios_chromium_appconfig_target": browsers.ios_allowed_bundle_id(p.ios),
+            "android_force_install": browsers.android_allowed_package(p.android),
+        },
     }
 
 

@@ -14,6 +14,9 @@ Platform = Literal["ios", "android", "chromeos", "windows", "macos", "linux", "o
 RuleAction = Literal["block", "allow", "flag"]
 DayKind = Literal["weekday", "weekend"]
 
+IosBrowser = Literal["chrome", "safari", "firefox", "edge", "brave", "none"]
+AndroidBrowser = Literal["chrome", "firefox", "edge", "brave", "samsung_internet", "none"]
+
 
 MdmStatus = Literal["pending", "enrolled", "checked_out"]
 
@@ -192,9 +195,48 @@ class Kid(BaseModel):
     mitm_passthrough_disabled: list[str] = []
 
 
+class IosBrowserPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allowed_browser: IosBrowser = "chrome"
+    # Extra iOS bundle IDs to block beyond the curated catalog.
+    extra_blocked: list[str] = []
+    # Bundle IDs to drop from the curated block list (e.g. allow Firefox
+    # alongside Chrome). Wins over `extra_blocked`.
+    unblocked: list[str] = []
+
+
+class AndroidBrowserPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allowed_browser: AndroidBrowser = "chrome"
+    extra_blocked: list[str] = []
+    unblocked: list[str] = []
+
+
+class ChromeManagedConfig(BaseModel):
+    """Chromium managed-app-config keys pushed to whichever Chromium-based
+    browser is allowed (Chrome / Edge / Brave on iOS, Chrome on Android).
+    Has no effect on Safari / Firefox / `none`."""
+    model_config = ConfigDict(extra="forbid")
+    incognito_disabled: bool = True
+    sync_disabled: bool = True
+    signin_disabled: bool = True
+    search_suggest_enabled: bool = False
+
+
+class BrowserPolicy(BaseModel):
+    """Global browser containment policy. Renders into iOS Restrictions +
+    App Configuration payloads and AMAPI applications[] entries.
+    Optional in kids.yaml — absent block gets all defaults."""
+    model_config = ConfigDict(extra="forbid")
+    ios: IosBrowserPolicy = IosBrowserPolicy()
+    android: AndroidBrowserPolicy = AndroidBrowserPolicy()
+    chrome_managed_config: ChromeManagedConfig = ChromeManagedConfig()
+
+
 class KidsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kids: list[Kid] = []
+    browser_policy: BrowserPolicy = BrowserPolicy()
 
     def kid(self, name: str) -> Kid | None:
         return next((k for k in self.kids if k.name == name), None)

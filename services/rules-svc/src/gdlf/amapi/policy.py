@@ -18,7 +18,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from .. import wg
+from .. import browsers, store, wg
 from ..schema import Device, Kid
 
 
@@ -64,21 +64,41 @@ def build_policy(kid: Kid, device: Device) -> dict:
     ca_b64 = _load_ca_b64()
     wg_conf = _wg_conf_for(kid, device)
 
-    return {
+    bp = store.load().browser_policy
+    apps: list[dict] = [
         # Force-install WireGuard with the kid's tunnel config baked in via
         # Android Enterprise managed config. The DPC injects this at the
         # moment WG is installed, so no manual "import" step is needed.
-        "applications": [
-            {
-                "packageName": WG_PACKAGE,
-                "installType": "FORCE_INSTALLED",
-                "defaultPermissionPolicy": "GRANT",
-                "managedConfiguration": {
-                    "config": wg_conf,
-                    "tunnel_name": "gdlf",
-                },
+        {
+            "packageName": WG_PACKAGE,
+            "installType": "FORCE_INSTALLED",
+            "defaultPermissionPolicy": "GRANT",
+            "managedConfiguration": {
+                "config": wg_conf,
+                "tunnel_name": "gdlf",
             },
-        ],
+        },
+    ]
+    allowed_pkg = browsers.android_allowed_package(bp.android)
+    if allowed_pkg is not None:
+        entry: dict = {
+            "packageName": allowed_pkg,
+            "installType": "FORCE_INSTALLED",
+            "defaultPermissionPolicy": "GRANT",
+        }
+        # Chromium-based browsers (Chrome / Edge / Brave) honour the
+        # managed-app-config keys we set; Firefox + Samsung Internet
+        # don't, so attaching the dict would be a no-op (skip it).
+        if bp.android.allowed_browser in browsers.CHROMIUM_BROWSER_KEYS:
+            entry["managedConfiguration"] = browsers.chrome_cfg_dict(bp.chrome_managed_config)
+        apps.append(entry)
+    apps.extend(
+        {"packageName": pkg, "installType": "BLOCKED"}
+        for pkg in browsers.android_blocklist(bp.android)
+    )
+
+    return {
+        "applications": apps,
         # Pin WG as the always-on VPN. `lockdownEnabled` = "Block connections
         # without VPN" — same effect as the Settings toggle a parent would
         # otherwise enable manually, but enforced and irrevocable.

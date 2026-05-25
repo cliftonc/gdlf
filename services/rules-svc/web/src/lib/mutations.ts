@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, withDl } from "./api";
 import { qk } from "./queries";
-import { ShortlinkSchema, type Platform, type RuleAction, type Shortlink } from "./schemas";
+import { ShortlinkSchema, type BrowserPolicy, type Platform, type RuleAction, type Shortlink } from "./schemas";
 
 export function useLogin() {
   return useMutation({
@@ -446,6 +446,17 @@ export function usePruneNow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => api("/api/settings/prune", { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.settings }),
+  });
+}
+
+export type BrowserPolicyInput = Omit<BrowserPolicy, "effective">;
+
+export function useUpdateBrowserPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (policy: BrowserPolicyInput) =>
+      api("/api/settings/browser-policy", { method: "PUT", body: policy }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.settings }),
   });
 }

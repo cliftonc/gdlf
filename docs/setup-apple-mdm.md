@@ -249,7 +249,34 @@ On the phone you can verify:
 - Settings → General → About → Certificate Trust Settings → the gdlf CA
   is auto-trusted (no manual trust step needed — MDM-pushed roots are
   auto-trusted)
-- Open any HTTPS site in Safari — no certificate warnings
+- Open the allowed browser (default: Chrome — see step 7 below) — no
+  certificate warnings
+
+### 7. Install the allowed browser
+
+Browser containment is part of the baseline profile. By default Safari
+is **disabled**, and every other known third-party browser (Firefox,
+Brave, DuckDuckGo, Edge, Opera, …) is **blocked** at the App Store
+install step. The dashboard's *Settings → Browser policy* picker
+controls which one browser is allowed.
+
+Apple MDM cannot force-install a free App Store app without Apple
+Business Manager, which gdlf doesn't integrate today. So on the device
+itself, after enrolment:
+
+1. Note the allowed browser shown in the dashboard's *Settings → Browser
+   policy* card (default: **Chrome**).
+2. On the phone, open the App Store and install that browser. Every
+   other browser will refuse to install with "restricted by your device
+   administrator" — that's the policy working.
+3. Open it once. The gdlf App Configuration payload binds on first
+   launch, disabling Incognito / Sync / Sign-in (per the dashboard
+   toggles).
+
+If the parent sets *Allowed browser* to Safari, skip this step — Safari
+becomes the allowed browser and stays on the device. If set to **None**,
+the device has no browser at all and web access only happens via in-app
+WebViews (which still flow through the WireGuard tunnel).
 
 ---
 

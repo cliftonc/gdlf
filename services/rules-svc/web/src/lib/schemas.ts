@@ -211,6 +211,61 @@ export const EventSchema = z.object({
 });
 export type Event = z.infer<typeof EventSchema>;
 
+export const IosBrowserEnum = z.enum([
+  "chrome",
+  "safari",
+  "firefox",
+  "edge",
+  "brave",
+  "none",
+]);
+export type IosBrowser = z.infer<typeof IosBrowserEnum>;
+
+export const AndroidBrowserEnum = z.enum([
+  "chrome",
+  "firefox",
+  "edge",
+  "brave",
+  "samsung_internet",
+  "none",
+]);
+export type AndroidBrowser = z.infer<typeof AndroidBrowserEnum>;
+
+export const BrowserPolicySchema = z.object({
+  ios: z.object({
+    allowed_browser: IosBrowserEnum,
+    extra_blocked: z.array(z.string()),
+    unblocked: z.array(z.string()),
+  }),
+  android: z.object({
+    allowed_browser: AndroidBrowserEnum,
+    extra_blocked: z.array(z.string()),
+    unblocked: z.array(z.string()),
+  }),
+  chrome_managed_config: z.object({
+    incognito_disabled: z.boolean(),
+    sync_disabled: z.boolean(),
+    signin_disabled: z.boolean(),
+    search_suggest_enabled: z.boolean(),
+  }),
+  // Server-computed effective view. Read-only — not sent on PUT.
+  effective: z.object({
+    ios_blocklist: z.array(z.string()),
+    android_blocklist: z.array(z.string()),
+    ios_chromium_appconfig_target: z.string().nullable(),
+    android_force_install: z.string().nullable(),
+  }).optional(),
+});
+export type BrowserPolicy = z.infer<typeof BrowserPolicySchema>;
+
+export const BrowserCatalogEntrySchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  ios_supported: z.boolean(),
+  android_supported: z.boolean(),
+});
+export type BrowserCatalogEntry = z.infer<typeof BrowserCatalogEntrySchema>;
+
 export const SettingsSchema = z.object({
   ca_present: z.boolean(),
   ca_url: z.string(),
@@ -230,6 +285,8 @@ export const SettingsSchema = z.object({
     db_path: z.string(),
     db_bytes: z.number(),
   }),
+  browser_policy: BrowserPolicySchema,
+  available_browsers: z.array(BrowserCatalogEntrySchema),
 });
 export type Settings = z.infer<typeof SettingsSchema>;
 

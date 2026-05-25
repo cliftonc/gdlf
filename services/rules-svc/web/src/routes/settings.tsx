@@ -1,16 +1,32 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
+  Accordion,
+  AccordionItem,
   Button,
   Card,
   CardBody,
   CardHeader,
   Chip,
+  Select,
+  SelectItem,
   Spinner,
+  Switch,
+  Textarea,
 } from "@heroui/react";
 import { useSettings } from "../lib/queries";
-import { usePruneNow } from "../lib/mutations";
+import {
+  type BrowserPolicyInput,
+  usePruneNow,
+  useUpdateBrowserPolicy,
+} from "../lib/mutations";
 import { useConfirm } from "../lib/hooks/useConfirm";
+import type {
+  AndroidBrowser,
+  BrowserCatalogEntry,
+  BrowserPolicy,
+  IosBrowser,
+} from "../lib/schemas";
 
 export const Route = createFileRoute("/settings")({
   component: SettingsPage,
@@ -147,6 +163,11 @@ function SettingsPage() {
         </CardBody>
       </Card>
 
+      <BrowserPolicyCard
+        policy={s.data.browser_policy}
+        catalog={s.data.available_browsers}
+      />
+
       <Card>
         <CardHeader>
           <p className="text-sm font-semibold">Activity storage</p>
@@ -189,5 +210,228 @@ function Stat({ label, value }: { label: string; value: string }) {
       <p className="text-xs uppercase tracking-wide text-default-500">{label}</p>
       <p className="font-mono text-sm break-all">{value}</p>
     </div>
+  );
+}
+
+const IOS_BROWSER_OPTIONS: IosBrowser[] = ["chrome", "safari", "firefox", "edge", "brave", "none"];
+const ANDROID_BROWSER_OPTIONS: AndroidBrowser[] = [
+  "chrome",
+  "firefox",
+  "edge",
+  "brave",
+  "samsung_internet",
+  "none",
+];
+
+function splitLines(s: string): string[] {
+  return s.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+function BrowserPolicyCard({
+  policy,
+  catalog,
+}: {
+  policy: BrowserPolicy;
+  catalog: BrowserCatalogEntry[];
+}) {
+  const update = useUpdateBrowserPolicy();
+  const confirm = useConfirm();
+
+  // Local form state, seeded from the server. Saved on Save button.
+  const [iosBrowser, setIosBrowser] = useState<IosBrowser>(policy.ios.allowed_browser);
+  const [iosExtra, setIosExtra] = useState(policy.ios.extra_blocked.join("\n"));
+  const [iosUnblocked, setIosUnblocked] = useState(policy.ios.unblocked.join("\n"));
+  const [andBrowser, setAndBrowser] = useState<AndroidBrowser>(policy.android.allowed_browser);
+  const [andExtra, setAndExtra] = useState(policy.android.extra_blocked.join("\n"));
+  const [andUnblocked, setAndUnblocked] = useState(policy.android.unblocked.join("\n"));
+  const [cfg, setCfg] = useState(policy.chrome_managed_config);
+
+  const iosLabelFor = useMemo(() => {
+    const map: Record<string, string> = {};
+    catalog.forEach((c) => (map[c.key] = c.label));
+    return (k: string) => map[k] ?? k;
+  }, [catalog]);
+
+  const iosOptions = IOS_BROWSER_OPTIONS.map((k) => ({
+    key: k,
+    label: k === "safari" ? "Safari" : k === "none" ? "None (no browser)" : iosLabelFor(k),
+  }));
+  const andOptions = ANDROID_BROWSER_OPTIONS.map((k) => ({
+    key: k,
+    label: k === "none" ? "None (no browser)" : iosLabelFor(k),
+  }));
+
+  const onSave = async () => {
+    const ok = await confirm({
+      title: "Apply new browser policy?",
+      body:
+        "All enrolled iOS and Android devices will be re-pushed within a few minutes. " +
+        "Removed browsers will become unlaunchable on those devices.",
+      confirmLabel: "Apply",
+    });
+    if (!ok) return;
+    const body: BrowserPolicyInput = {
+      ios: {
+        allowed_browser: iosBrowser,
+        extra_blocked: splitLines(iosExtra),
+        unblocked: splitLines(iosUnblocked),
+      },
+      android: {
+        allowed_browser: andBrowser,
+        extra_blocked: splitLines(andExtra),
+        unblocked: splitLines(andUnblocked),
+      },
+      chrome_managed_config: cfg,
+    };
+    await update.mutateAsync(body);
+  };
+
+  const eff = policy.effective;
+  return (
+    <Card>
+      <CardHeader className="flex flex-col items-start gap-1">
+        <p className="text-sm font-semibold">Browser policy</p>
+        <p className="text-xs text-default-500">
+          The kid's traffic is filtered at the network layer no matter which browser they use,
+          but some browsers (Firefox, Brave) ship their own DoH or cert store that weaken the
+          chain. This locks the device to one browser per platform.
+        </p>
+      </CardHeader>
+      <CardBody className="flex flex-col gap-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <div className="flex flex-col gap-3">
+            <p className="text-xs uppercase tracking-wide text-default-500">iOS</p>
+            <Select
+              label="Allowed browser"
+              selectedKeys={[iosBrowser]}
+              onSelectionChange={(keys) => {
+                const k = Array.from(keys)[0];
+                if (k) setIosBrowser(k as IosBrowser);
+              }}
+            >
+              {iosOptions.map((o) => (
+                <SelectItem key={o.key}>{o.label}</SelectItem>
+              ))}
+            </Select>
+            {eff && (
+              <p className="text-xs text-default-500">
+                {eff.ios_blocklist.length} bundle IDs blocked
+                {eff.ios_chromium_appconfig_target
+                  ? ` · managed config → ${eff.ios_chromium_appconfig_target}`
+                  : ""}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-col gap-3">
+            <p className="text-xs uppercase tracking-wide text-default-500">Android</p>
+            <Select
+              label="Allowed browser"
+              selectedKeys={[andBrowser]}
+              onSelectionChange={(keys) => {
+                const k = Array.from(keys)[0];
+                if (k) setAndBrowser(k as AndroidBrowser);
+              }}
+            >
+              {andOptions.map((o) => (
+                <SelectItem key={o.key}>{o.label}</SelectItem>
+              ))}
+            </Select>
+            {eff && (
+              <p className="text-xs text-default-500">
+                {eff.android_blocklist.length} packages blocked
+                {eff.android_force_install ? ` · force-install ${eff.android_force_install}` : ""}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <p className="text-xs uppercase tracking-wide text-default-500">
+            Managed config for Chromium-based browsers
+          </p>
+          <p className="text-xs text-default-500">
+            Applied to Chrome / Edge / Brave on iOS, and Chrome on Android. Has no effect on
+            Safari, Firefox, or when no browser is allowed.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Switch
+              isSelected={cfg.incognito_disabled}
+              onValueChange={(v) => setCfg({ ...cfg, incognito_disabled: v })}
+            >
+              Disable Incognito / Private mode
+            </Switch>
+            <Switch
+              isSelected={cfg.sync_disabled}
+              onValueChange={(v) => setCfg({ ...cfg, sync_disabled: v })}
+            >
+              Disable Sync
+            </Switch>
+            <Switch
+              isSelected={cfg.signin_disabled}
+              onValueChange={(v) => setCfg({ ...cfg, signin_disabled: v })}
+            >
+              Disable browser sign-in
+            </Switch>
+            <Switch
+              isSelected={cfg.search_suggest_enabled}
+              onValueChange={(v) => setCfg({ ...cfg, search_suggest_enabled: v })}
+            >
+              Enable search suggestions
+            </Switch>
+          </div>
+        </div>
+
+        <Accordion>
+          <AccordionItem
+            key="advanced"
+            aria-label="Advanced overrides"
+            title="Advanced — extra IDs to block, or to unblock"
+            subtitle="One bundle ID / package name per line"
+          >
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+              <Textarea
+                label="iOS extra blocked (bundle IDs)"
+                value={iosExtra}
+                onValueChange={setIosExtra}
+                placeholder="com.example.browser"
+                minRows={3}
+              />
+              <Textarea
+                label="iOS unblocked (override curated list)"
+                value={iosUnblocked}
+                onValueChange={setIosUnblocked}
+                placeholder="org.mozilla.ios.Firefox"
+                minRows={3}
+              />
+              <Textarea
+                label="Android extra blocked (packages)"
+                value={andExtra}
+                onValueChange={setAndExtra}
+                placeholder="com.example.browser"
+                minRows={3}
+              />
+              <Textarea
+                label="Android unblocked (override curated list)"
+                value={andUnblocked}
+                onValueChange={setAndUnblocked}
+                placeholder="org.mozilla.firefox"
+                minRows={3}
+              />
+            </div>
+          </AccordionItem>
+        </Accordion>
+
+        <div>
+          <Button
+            color="primary"
+            onPress={onSave}
+            isLoading={update.isPending}
+            className="self-start"
+          >
+            Save browser policy
+          </Button>
+        </div>
+      </CardBody>
+    </Card>
   );
 }

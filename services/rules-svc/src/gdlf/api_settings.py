@@ -5,7 +5,8 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
-from . import db
+from . import browsers, db, dto, store
+from .schema import BrowserPolicy
 from .settings import settings
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -18,6 +19,7 @@ def _ca_present() -> bool:
 @router.get("")
 def get_settings() -> dict:
     s = db.stats()
+    cfg = store.load()
     return {
         "ca_present": _ca_present(),
         "ca_url": "/ca.pem",
@@ -37,7 +39,21 @@ def get_settings() -> dict:
             "db_path": s["db_path"],
             "db_bytes": s["db_bytes"],
         },
+        "browser_policy": dto.browser_policy_dto(cfg.browser_policy),
+        "available_browsers": browsers.catalog_for_api(),
     }
+
+
+@router.put("/browser-policy")
+def put_browser_policy(policy: BrowserPolicy) -> dict:
+    """Replace the global browser policy. FastAPI validates the body
+    against the pydantic model — unknown keys (`extra=forbid`) fail with
+    422. `store.mutate` fires the mutation_event, which triggers the iOS
+    orchestrator re-push and the AMAPI policy-watch debounce."""
+    @store.mutate
+    def _apply(cfg):
+        cfg.browser_policy = policy
+    return dto.browser_policy_dto(policy)
 
 
 @router.post("/prune")
