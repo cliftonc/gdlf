@@ -5,7 +5,11 @@
 # gdlf — family network protection stack
 
 A self-hosted parental-control appliance. Kids' devices connect over
-WireGuard 24/7 and their traffic is filtered at three levels:
+WireGuard 24/7; their traffic is filtered at four levels and — on
+managed platforms — the device itself is locked down so the kid can't
+walk away from the policy.
+
+**Filtering**
 
 - **AdGuard** — DNS blocking (categories, custom lists, parental filter)
 - **mitmproxy** — URL-path-level allow / block / flag rules. **Splice by
@@ -16,16 +20,32 @@ WireGuard 24/7 and their traffic is filtered at three levels:
 - **nftables** — per-device schedule enforcement (out of hours = blocked)
   with friendly "you shall not pass" pages for HTTP, fast TCP-RST for HTTPS
 
+**Containment (MDM)** — first-class for iOS, Android, and Windows. The
+filtering layer alone is a guardrail: a determined kid can disable the
+VPN, refuse the CA, or install another VPN that takes precedence. The
+MDM layer closes those loopholes by enforcing policy at the OS, not the
+network:
+
+- **Always-on WireGuard with no user override** — iOS
+  `OnDemandUserOverrideDisabled`, Android `alwaysOnVpnPackage` +
+  `lockdownEnabled`, Windows kernel-level WFP kill-switch + service ACL.
+- **System-trusted mitmproxy CA** auto-pushed (every app, not just
+  browsers — and a managed CA also opts Chrome/Firefox out of ECH, which
+  is the long-term threat to SNI visibility).
+- **Bypass paths blocked** — no adding a second VPN, no installing
+  profiles, no factory reset (iOS), no uninstalling the tunnel
+  (Windows / Android Device Owner), kid runs as Standard User
+  (Windows).
+- **DoH/DoT denied** at the OS layer on managed devices; non-MDM devices
+  fall back to the nftables drop-list of well-known DoH resolvers.
+
+One-time setup per platform: ~15 min Android · ~30 min iOS · ~10 min
+Windows. See the walk-throughs in [Quick start](#quick-start).
+
 A single FastAPI dashboard (`rules-svc`) is the parent's control plane:
 enrol devices via QR, edit per-kid rules, view real-time activity, get
 push/email alerts on flagged events. `config/kids.yaml` is the
 declarative source of truth — UI edits and hand edits cooperate.
-
-For iOS, Android and Windows, optional **MDM enrolment** upgrades the
-guardrail into actual containment: always-on WireGuard the kid can't
-toggle, system-trusted mitmproxy CA (every app, not just browsers), and
-restrictions blocking the obvious bypass paths (add VPN, install profile,
-factory reset, uninstall the tunnel). See setup guides below.
 
 ## Layout
 
@@ -90,12 +110,13 @@ dashboard's **Settings** page; AdGuard's own UI is on
    except the ones on the kid's **Inspect** list — so pinned apps stay
    functional and the CA is only "used" on hosts you've opted in.
 
-### MDM (optional, stronger lockdown)
+### MDM enrolment — turn the guardrail into containment
 
-The manual flow above is a guardrail — a determined kid can disable the
-VPN in Settings, refuse to trust the CA, or install another VPN that
-takes precedence. MDM closes those loopholes by enforcing the policy
-at the OS level on a supervised / device-owner phone:
+Strongly recommended on any platform where you can wipe (or stand up a
+new Standard User on) the device. Without MDM the filtering layer is
+still a guardrail, but the kid keeps the keys: Settings → VPN → off,
+decline the CA, install ProtonVPN — all unblocked. MDM removes those
+choices.
 
 - **Android** — Google's Android Management API. ~15-minute one-time
   setup, then scan a QR on a factory-reset phone. See
@@ -104,11 +125,10 @@ at the OS level on a supervised / device-owner phone:
   one-time setup (APNs cert + signing CA + Cloudflare DNS-01), then
   Apple Configurator 2 on a Mac with the phone cabled in. See
   [docs/setup-apple-mdm.md](docs/setup-apple-mdm.md).
-- **Windows 10 / 11** (Home, Pro, Education, Enterprise) — a signed
-  Provisioning Package the parent applies once as Administrator. No live
-  channel; the kid runs as a Standard User as the containment boundary.
-  ~10-minute one-time setup. See
-  [docs/setup-windows-mdm.md](docs/setup-windows-mdm.md).
+- **Windows 10 / 11** (Home, Pro, Education, Enterprise) — a one-shot
+  `.zip` the parent runs once as Administrator. No live channel; the kid
+  runs as Standard User as the containment boundary. ~10-minute one-time
+  setup. See [docs/setup-windows-mdm.md](docs/setup-windows-mdm.md).
 
 Android / iOS require wiping the device — Device Owner / supervised mode
 can only be set during initial provisioning. Windows does not require a
