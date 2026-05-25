@@ -156,21 +156,42 @@ standalone `docker-compose` binary.
 
 ## Pragmatic boundaries (intentional)
 
-* **DoH/DoT bypass is not fought** — kids who actively want to escape can
-  set Private DNS to `dns.google`. We could `nft drop` :853 outbound to
-  force fallback, but the parent's threat model here is guardrail not
-  containment. **EXCEPT** for iOS devices enrolled in MDM (see
-  `services/rules-svc/CLAUDE.md` § MDM), Android devices enrolled via
-  AMAPI as Device Owner, and Windows devices enrolled via the gdlf
-  Provisioning Package (kid running as Standard User; WG per-tunnel
-  service is ACL'd, kernel kill-switch on): for those, the WireGuard
-  tunnel is always-on and non-removable, the CA is system-trusted, and
-  adding another VPN / profile is restricted at the OS level — so the
-  guardrail becomes containment for those platforms.
+* **HTTPS interception is splice-by-default, MITM-opt-in.** mitmproxy's
+  `tls_clienthello` hook decides per-flow: SNIs in the kid's
+  `mitm_inspect_hosts` (plus `INSPECT_GLOBAL_DEFAULTS` in `bulk_cdns.py`,
+  currently just YouTube / googlevideo) get terminated and decrypted so
+  URL-path rules fire. Everything else is `ignore_connection = True` —
+  TLS bytes are tunneled untouched. This means pinned-cert apps Just
+  Work (no CA validation = nothing to reject), and `tls_failed_client`
+  fires rarely; when it does, it's actionable (the parent inspect-listed
+  a pinned domain). The earlier "MITM-everything, exempt-on-failure"
+  model produced runaway passthrough lists and is gone.
+* **DoH/DoT outbound is dropped** at the nftables sidecar for a curated
+  list of well-known resolver IPs (Cloudflare/Google/Quad9/OpenDNS/
+  AdGuard/NextDNS/Mullvad on :443 and :853 — see `DOH_DOT_IPS` in
+  `nftables/reconcile.py`), and AdGuard returns NXDOMAIN for the
+  Firefox canary `use-application-dns.net`. Without this, a kid
+  enabling Chrome's "Use secure DNS → Cloudflare" silently bypasses
+  every filter. MDM-enrolled devices (iOS supervised, Android Device
+  Owner via AMAPI, Windows with locked WG service ACL + kill-switch)
+  also have DoH/DoT denied at the OS layer — this nftables drop is
+  the safety net for non-MDM / pre-enrolment.
+* **MDM is containment, not guardrail, on managed platforms.** iOS
+  supervised: WireGuard always-on (`OnDemandUserOverrideDisabled`),
+  CA system-trusted, no VPN-creation/profile-install restrictions.
+  Android Device Owner: same plus `alwaysOnVpnPackage` lockdown. Windows:
+  per-tunnel WG service ACL'd, kernel kill-switch, kid is Standard User.
 * **QUIC (UDP/443) is blocked for `mitm_clients`** so browsers fall back
-  to TCP/TLS and mitmproxy can actually see traffic. Devices without the
-  CA still get QUIC; we just can't inspect them beyond DNS / SNI.
-* **mitmproxy can't decrypt cert-pinned apps** (TikTok, Instagram, banking
-  apps) — those show up as SNI-only events (filtered from default view).
+  to TCP/TLS and SNI/path inspection still works. Without this, every
+  QUIC-capable destination escapes to UDP and we lose visibility.
+* **Inspecting pinned apps is impossible at the network layer.** If you
+  add `instagram.com` to `mitm_inspect_hosts`, Instagram will fail.
+  Use MDM allowlists or OAuth-based account monitoring for visibility
+  into those.
 * **Per-kid identity uses the WG peer IP** — there's no per-request auth.
   Trusted because each device is enrolled by a parent.
+* **ECH is a slow-motion threat to SNI visibility.** When Encrypted
+  Client Hello deploys broadly, SNI-only filtering breaks. Today only
+  ~4–9% of top sites. Chrome/Firefox both disable ECH when a trusted
+  managed CA is present, so the MDM-pushed CA path is the durable
+  long-term answer.

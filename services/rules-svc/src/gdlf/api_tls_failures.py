@@ -1,33 +1,36 @@
 """TLS-failure tracking API.
 
-The mitmproxy addon posts here every time a client refuses our certificate.
-We upsert into the `tls_failures` table (keyed by kid + host) and surface
-the data to the dashboard as groups of registrable-domain children, so the
-parent can enable passthrough for `*.reddit.com` with a single switch
-instead of allowing each subdomain individually.
+Reads the same `event` table the activity feed does, filtered to
+`decision='tls_failed'`. The mitmproxy addon's `tls_failed_client`
+hook emits these via the unified `POST /api/events` ingest — there's
+no separate write path anymore.
 
-This stays out of the activity log on purpose — pinned-cert apps retry
-constantly and would otherwise dominate the feed.
+Under splice-by-default this stream is normally near-empty: we only
+present a MITM cert for SNIs in the inspect list, so a non-inspect-listed
+pinned app never fails — it splices. Rows here mean the parent
+inspect-listed a domain whose app pins, and that's actionable: surface
+it so they can remove it.
+
+The `POST` and `DELETE` routes are kept as backwards-compat no-ops for
+one release so a stale addon (or SPA) doesn't error against the new
+backend.
 """
 from __future__ import annotations
 
 import tldextract
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from . import db, store
 
-# Use the in-memory snapshot so we don't fetch the public-suffix list on
-# every container start. `suffix_list_urls=()` disables network entirely;
-# the package ships with a bundled snapshot that's good enough for our
-# purposes (the PSL changes slowly and we only need it for grouping).
+# In-memory snapshot of the public-suffix list (no network on container
+# start). The bundled snapshot is fine for grouping.
 _extract = tldextract.TLDExtract(suffix_list_urls=())
 
 
 def registrable_domain(host: str) -> str:
-    """Return eTLD+1 for grouping (`gql-fed.reddit.com` → `reddit.com`,
-    `news.bbc.co.uk` → `bbc.co.uk`). Falls back to the host itself if
-    extraction can't find a registered domain (bare IPs, localhost, etc.)."""
+    """eTLD+1 for grouping (`gql-fed.reddit.com` → `reddit.com`)."""
     parsed = _extract(host or "")
     if parsed.domain and parsed.suffix:
         return f"{parsed.domain}.{parsed.suffix}".lower()
@@ -37,194 +40,117 @@ def registrable_domain(host: str) -> str:
 router = APIRouter(prefix="/api/tls-failures", tags=["tls-failures"])
 
 
-def _group_patterns(registrable: str) -> tuple[str, str]:
-    """The two fnmatch globs that cover a registrable domain — the apex itself
-    and any subdomain. Mirrors `groupPatterns` in the SPA so on/off semantics
-    stay in sync between server-side auto-enable and the toggle endpoint."""
-    return (registrable, f"*.{registrable}")
-
-
-def _auto_enable_passthrough(kid_name: str, registrable: str) -> None:
-    """If `registrable` isn't on the kid's opt-out list, ensure both group
-    patterns are present in their `mitm_passthrough_hosts`. Idempotent —
-    only writes the YAML when something actually changes."""
-    if not registrable:
-        return
-    cfg = store.load()
-    kid = cfg.kid(kid_name)
-    if not kid:
-        return
-    if registrable in kid.mitm_passthrough_disabled:
-        return
-    apex, wild = _group_patterns(registrable)
-    have = set(kid.mitm_passthrough_hosts)
-    if apex in have and wild in have:
-        return
-
-    def _add(c):
-        k = c.kid(kid_name)
-        if not k:
-            return
-        if registrable in k.mitm_passthrough_disabled:
-            return
-        merged = set(k.mitm_passthrough_hosts)
-        merged.update(_group_patterns(registrable))
-        k.mitm_passthrough_hosts = sorted(merged)
-
-    store.mutate(_add)
-
-
 class IngestBody(BaseModel):
     client_ip: str
     host: str
+    error: str = ""
 
 
 @router.post("")
 def ingest(body: IngestBody) -> dict:
-    """mitmproxy addon → here. Resolves the client IP to a kid/device via
-    kids.yaml, bumps the row in `tls_failures`, and (unless the parent has
-    opted the registrable out) auto-adds the apex + wildcard to the kid's
-    passthrough list so the next handshake just works."""
-    host = (body.host or "").strip().lower()
-    client_ip = (body.client_ip or "").strip()
-    if not host or not client_ip:
+    """Legacy endpoint — kept as a no-op for one release.
+
+    The mitmproxy addon now emits TLS failures via the unified
+    `POST /api/events` channel (with `decision='tls_failed'`), which goes
+    through the same dedup upsert as every other event.
+    """
+    if not (body.host or "").strip() or not (body.client_ip or "").strip():
         raise HTTPException(400, "client_ip and host required")
-    cfg = store.load()
-    found = cfg.device_by_ip(client_ip)
-    kid_name = found[0].name if found else None
-    device_name = found[1].name if found else None
-    reg = registrable_domain(host)
-    db.upsert_tls_failure(
-        kid=kid_name,
-        device=device_name,
-        client_ip=client_ip,
-        host=host,
-        registrable=reg,
-    )
-    if kid_name:
-        _auto_enable_passthrough(kid_name, reg)
-    return {"ok": True}
+    return {"ok": True, "deprecated": True}
 
 
 @router.get("")
 def list_failures(kid: str | None = None) -> dict:
-    """Grouped failures for the Passthrough tab.
+    """Grouped TLS failures for the Inspect tab.
 
-    Backfills auto-passthrough for any observed registrable not on the kid's
-    opt-out list — covers failures that pre-date the default-on behaviour so
-    the parent doesn't have to wait for the next retry to see things working.
+    Response shape unchanged from the old `tls_failures`-backed version
+    so the SPA doesn't need updates:
 
-    Response shape:
       {"groups": [
-        {"registrable": "reddit.com", "enabled": true,
-         "ts_last": "...", "count": 17, "kid": "Clifton",
-         "children": [{"id": 12, "host": "gql-fed.reddit.com",
-                       "count": 9, "ts_first": "...", "ts_last": "...",
+        {"registrable": "examplebank.com", "kid": "Clifton",
+         "count": 17, "ts_last": "...", "error": "...",
+         "children": [{"id": 12, "host": "api.examplebank.com",
+                       "count": 9, "error": "...",
+                       "ts_first": "...", "ts_last": "...",
                        "device": "phone"}, ...]
         }, ...]}
     """
-    rows = db.list_tls_failures(kid=kid)
-
-    # Gather (kid, registrable) pairs and backfill any missing auto-passthrough
-    # in a single mutate. Cheap when nothing's missing — we compare set-by-set
-    # before deciding to write.
-    observed: dict[str, set[str]] = {}
-    for r in rows:
-        if r.kid and r.registrable:
-            observed.setdefault(r.kid, set()).add(r.registrable)
-    if observed:
-        _backfill_auto_passthrough(observed)
-
-    cfg = store.load()
-    disabled_by_kid: dict[str, set[str]] = {
-        k.name: set(k.mitm_passthrough_disabled) for k in cfg.kids
-    }
+    where = ["decision = 'tls_failed'"]
+    params: dict = {}
+    if kid is not None:
+        where.append("kid = :kid")
+        params["kid"] = kid
+    sql = text(
+        "SELECT id, kid, device, client_ip, host, "
+        "COALESCE(registrable, host) AS registrable, "
+        "SUM(hit_count) AS count, MIN(ts) AS ts_first, MAX(ts_last) AS ts_last, "
+        "note AS error "
+        "FROM event "
+        f"WHERE {' AND '.join(where)} "
+        "GROUP BY kid, COALESCE(host,''), client_ip "
+        "ORDER BY ts_last DESC"
+    )
+    with db.session() as s:
+        rows = s.connection().execute(sql, params).all()
 
     grouped: dict[tuple[str | None, str], dict] = {}
     for r in rows:
-        key = (r.kid, r.registrable)
+        rid, rkid, device, client_ip, host, registrable, count, ts_first, ts_last, error = r
+        key = (rkid, registrable)
         g = grouped.get(key)
         if g is None:
-            enabled = not (r.kid and r.registrable in disabled_by_kid.get(r.kid, set()))
             g = {
-                "registrable": r.registrable,
-                "kid": r.kid,
-                "enabled": enabled,
+                "registrable": registrable,
+                "kid": rkid,
                 "count": 0,
                 "ts_last": None,
+                "error": None,
                 "children": [],
             }
             grouped[key] = g
-        g["count"] += r.count
-        if g["ts_last"] is None or (r.ts_last and r.ts_last > g["ts_last"]):
-            g["ts_last"] = r.ts_last
+        g["count"] += int(count or 0)
+        if g["ts_last"] is None or (ts_last and ts_last > g["ts_last"]):
+            g["ts_last"] = ts_last
+            g["error"] = error
         g["children"].append({
-            "id": r.id,
-            "host": r.host,
-            "device": r.device,
-            "client_ip": r.client_ip,
-            "count": r.count,
-            "ts_first": r.ts_first.isoformat() if r.ts_first else None,
-            "ts_last": r.ts_last.isoformat() if r.ts_last else None,
+            "id": int(rid) if rid is not None else None,
+            "host": host,
+            "device": device,
+            "client_ip": client_ip,
+            "count": int(count or 0),
+            "error": error,
+            "ts_first": ts_first.isoformat() if ts_first else None,
+            "ts_last": ts_last.isoformat() if ts_last else None,
         })
     out = []
     for g in grouped.values():
-        g["children"].sort(key=lambda c: c["host"])
+        g["children"].sort(key=lambda c: c["host"] or "")
         g["ts_last"] = g["ts_last"].isoformat() if g["ts_last"] else None
         out.append(g)
-    # Server-side sort is alphabetical by registrable; the SPA may re-sort
-    # but defaulting here keeps non-SPA consumers tidy too.
     out.sort(key=lambda g: g["registrable"] or "")
+    # Make sure the kid filter we got is also valid against kids.yaml so a
+    # typo returns an empty list rather than misleading data.
+    if kid is not None:
+        cfg = store.load()
+        if not any(k.name == kid for k in cfg.kids):
+            return {"groups": []}
     return {"groups": out}
-
-
-def _backfill_auto_passthrough(observed: dict[str, set[str]]) -> None:
-    """For every (kid, registrable) seen, ensure the apex + wildcard are in
-    the kid's passthrough list — unless the parent explicitly disabled it.
-    No-op when nothing's missing, so safe to call from every list request."""
-    cfg = store.load()
-    pending: dict[str, set[str]] = {}
-    for kname, regs in observed.items():
-        k = cfg.kid(kname)
-        if not k:
-            continue
-        disabled = set(k.mitm_passthrough_disabled)
-        have = set(k.mitm_passthrough_hosts)
-        add: set[str] = set()
-        for reg in regs:
-            if reg in disabled:
-                continue
-            apex, wild = _group_patterns(reg)
-            if apex not in have:
-                add.add(apex)
-            if wild not in have:
-                add.add(wild)
-        if add:
-            pending[kname] = add
-    if not pending:
-        return
-
-    def _apply(c):
-        for kname, add in pending.items():
-            k = c.kid(kname)
-            if not k:
-                continue
-            disabled = set(k.mitm_passthrough_disabled)
-            merged = set(k.mitm_passthrough_hosts)
-            for pat in add:
-                # Re-check disabled in case the parent toggled off between
-                # the snapshot and the mutation.
-                reg = pat[2:] if pat.startswith("*.") else pat
-                if reg in disabled:
-                    continue
-                merged.add(pat)
-            k.mitm_passthrough_hosts = sorted(merged)
-
-    store.mutate(_apply)
 
 
 @router.delete("/{failure_id}", status_code=204)
 def dismiss(failure_id: int):
-    if not db.delete_tls_failure(failure_id):
-        raise HTTPException(404, "unknown failure")
+    """Dismiss a single tls_failed row from the `event` table.
+
+    The Inspect tab uses this to clear an entry once the parent has
+    removed the host from the MITM list (or accepted that it'll keep
+    failing). The row stays gone until a new failure repopulates it on
+    the next handshake.
+    """
+    from sqlmodel import delete
+    with db.session() as s:
+        ev = s.get(db.Event, failure_id)
+        if not ev or ev.decision != "tls_failed":
+            raise HTTPException(404, "unknown failure")
+        s.exec(delete(db.Event).where(db.Event.id == failure_id))
+        s.commit()
     return None

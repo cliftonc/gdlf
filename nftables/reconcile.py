@@ -36,6 +36,41 @@ TZ = os.environ.get("TZ", "UTC")
 INTERVAL = int(os.environ.get("INTERVAL", "30"))
 
 
+# Well-known DoH / DoT resolver IPs. Dropped at :443 and :853 so a kid who
+# enables "Use secure DNS" in Chrome/Firefox falls back to system DNS (which
+# goes through AdGuard). Without this, DoH silently bypasses every filter.
+#
+# IPv4 only for now. List is curated; add by editing here. Last refreshed
+# 2026 — IPs change rarely but rotate sometimes. If a new resolver gains
+# popularity, append it here.
+DOH_DOT_IPS: tuple[str, ...] = (
+    # Cloudflare 1.1.1.1
+    "1.1.1.1", "1.0.0.1",
+    "1.1.1.2", "1.0.0.2",        # malware-blocking
+    "1.1.1.3", "1.0.0.3",        # malware+adult
+    # Google Public DNS
+    "8.8.8.8", "8.8.4.4",
+    # Quad9
+    "9.9.9.9", "149.112.112.112",
+    "9.9.9.10", "149.112.112.10",
+    "9.9.9.11", "149.112.112.11",
+    # OpenDNS / Cisco
+    "208.67.222.222", "208.67.220.220",
+    "208.67.222.123", "208.67.220.123",  # FamilyShield
+    # AdGuard public
+    "94.140.14.14", "94.140.15.15",
+    "94.140.14.15", "94.140.15.16",
+    # ControlD anycast (their public endpoints)
+    "76.76.2.0", "76.76.10.0",
+    # NextDNS anycast (sample of well-known endpoints)
+    "45.90.28.0", "45.90.30.0",
+    # Comodo Secure DNS
+    "8.26.56.26", "8.20.247.20",
+    # Mullvad
+    "194.242.2.2", "194.242.2.3",
+)
+
+
 def now_local() -> _dt.datetime:
     # Container TZ is set via env; localtime is correct.
     return _dt.datetime.now()
@@ -134,6 +169,7 @@ def render(cfg: dict, now: _dt.datetime) -> str:
         "table inet gdlf {",
         f"    set blocked_clients {{ type ipv4_addr; flags interval; elements = {{ {', '.join(blocked_ips) or '0.0.0.0/32'} }}; }}",
         f"    set mitm_clients    {{ type ipv4_addr; elements = {{ {', '.join(mitm_ips) or '0.0.0.0'} }}; }}",
+        f"    set doh_dot_ips     {{ type ipv4_addr; elements = {{ {', '.join(DOH_DOT_IPS)} }}; }}",
         "",
         "    chain prerouting {",
         "        type nat hook prerouting priority dstnat;",
@@ -180,6 +216,13 @@ def render(cfg: dict, now: _dt.datetime) -> str:
         # a fast TCP reset so the browser fails immediately instead of
         # hanging on a connect to nothing. HTTP path served by blockpage.
         "        iifname \"wg0\" ip daddr 10.13.13.254 tcp dport 443 reject with tcp reset",
+        # DoH/DoT containment. Without this, a kid setting Chrome's "Use
+        # secure DNS → Cloudflare" silently bypasses every filter. Reject
+        # so the browser fails fast and falls back to system DNS (AdGuard).
+        # MDM-enrolled devices already get DoH locked off at the OS layer;
+        # this is the safety net for pre-enrolment / non-MDM clients.
+        "        iifname \"wg0\" ip daddr @doh_dot_ips tcp dport { 443, 853 } reject with tcp reset",
+        "        iifname \"wg0\" ip daddr @doh_dot_ips udp dport { 443, 853 } drop",
         "    }",
         "",
         "    chain postrouting {",

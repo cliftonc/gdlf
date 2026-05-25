@@ -6,7 +6,6 @@ import {
   Select,
   SelectItem,
   Spinner,
-  Switch,
 } from "@heroui/react";
 import { useActivity, useKids } from "../lib/queries";
 import { useActivityStream } from "../lib/hooks/useActivityStream";
@@ -17,27 +16,27 @@ export const Route = createFileRoute("/activity")({
   component: ActivityPage,
 });
 
+// Decision strings the server persists into `event`. Order matches the
+// dropdown UX (most-actionable first). `passthrough` covers SNI splice
+// rows; `allow` covers MITM page navigations that weren't blocked.
 const DECISIONS = [
   "block",
-  "allow",
   "flag",
   "tls_failed",
-  "passthrough",
-  "sni_only",
   "dns_block",
+  "allow",
+  "passthrough",
 ];
 
 function ActivityPage() {
   const kids = useKids();
   const [kid, setKid] = useState<string | null>(null);
   const [decision, setDecision] = useState<string | null>(null);
-  const [sni, setSni] = useState(false);
-  const [assets, setAssets] = useState(false);
   const [paused, setPaused] = useState(false);
 
   const params = useMemo(
-    () => ({ kid, decision, sni, assets, limit: 50 }),
-    [kid, decision, sni, assets]
+    () => ({ kid, decision, limit: 50 }),
+    [kid, decision]
   );
 
   const events = useActivity(params);
@@ -92,14 +91,6 @@ function ActivityPage() {
             ))}
           </>
         </Select>
-        <div className="col-span-2 flex gap-4 sm:gap-3 sm:ml-2 sm:pb-2">
-          <Switch size="sm" isSelected={sni} onValueChange={setSni}>
-            Include SNI
-          </Switch>
-          <Switch size="sm" isSelected={assets} onValueChange={setAssets}>
-            Include assets
-          </Switch>
-        </div>
       </div>
 
       {events.isLoading && (

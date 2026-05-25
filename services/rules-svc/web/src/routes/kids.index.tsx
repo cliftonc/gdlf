@@ -14,6 +14,7 @@ import { useKids, useStatsOverview } from "../lib/queries";
 import { useCreateKid } from "../lib/mutations";
 import { KidCard } from "../components/KidCard";
 import { EmptyState } from "../components/EmptyState";
+import { ResourcesWidget } from "../components/ResourcesWidget";
 
 export const Route = createFileRoute("/kids/")({
   component: KidsIndex,
@@ -29,6 +30,8 @@ function KidsIndex() {
 
   return (
     <div className="flex flex-col gap-6">
+      <ResourcesWidget />
+
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Kids</h1>
         <Button color="primary" onPress={() => setOpen(true)}>

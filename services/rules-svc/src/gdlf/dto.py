@@ -77,7 +77,8 @@ def _is_online(last_handshake: int) -> bool:
 def rule_dto(r) -> dict[str, Any]:
     return {
         "action": r.action,
-        "match": r.match,
+        "host": r.host,
+        "path": r.path,
         "query": r.query,
         "flag": r.flag,
         "note": r.note,
@@ -125,6 +126,7 @@ def kid_detail_dto(k: Kid, handshakes: dict[str, dict]) -> dict[str, Any]:
         },
         "blocked_apps": list(k.blocked_apps),
         "keyword_flags": list(k.keyword_flags),
+        "mitm_inspect_hosts": list(k.mitm_inspect_hosts),
         "mitm_passthrough_hosts": list(k.mitm_passthrough_hosts),
         "mitm_passthrough_disabled": list(k.mitm_passthrough_disabled),
         "devices": [device_dto(d, handshakes.get(d.wg_ip)) for d in k.devices],
@@ -136,12 +138,17 @@ def event_dto(e: db.Event) -> dict[str, Any]:
     return {
         "id": e.id,
         "ts": e.ts.isoformat() if e.ts else None,
+        # `ts_last` is what the UI sorts on and renders as "Time" — `ts`
+        # is the first-seen timestamp for the (deduped) row.
+        "ts_last": e.ts_last.isoformat() if e.ts_last else None,
+        "hit_count": e.hit_count,
         "source": e.source,
         "client_ip": e.client_ip,
         "kid": e.kid,
         "device": e.device,
         "method": e.method,
         "host": e.host,
+        "registrable": e.registrable,
         "path": e.path,
         "query": e.query,
         "status": e.status,

@@ -1,12 +1,17 @@
 """Activity feed JSON + SSE stream.
 
-The SSE stream piggybacks on `pubsub.publish()` which is invoked from the
-existing /api/events writer (mitmproxy addon). Polling still works against
-GET /api/activity for clients that prefer it or fall back from a closed ES.
+The SSE stream emits `{"kind":"changed","kid":<name>}` pings as
+`pubsub.publish()` fires from the `/api/events` writer. The SPA
+debounces and refetches `/api/activity` (and the stats endpoints) on
+each ping. This keeps the live feed, the paged list, and the counter
+tiles byte-for-byte in sync — they all read from the same `event`
+table.
+
+Polling fallback: `/api/activity` is a normal GET and the SPA also
+polls every 5s if the SSE connection drops.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 
 from fastapi import APIRouter, Request
@@ -18,45 +23,33 @@ from .dto import event_dto
 router = APIRouter(prefix="/api/activity", tags=["activity"])
 
 
-def _filtered_events(kid, decision, include_sni, include_assets, limit=50):
-    """Mirror the legacy /activity logic: over-fetch then filter so the
-    visible 50 rows reflect 50 real page navigations rather than mixed noise."""
-    raw_limit = limit if (include_sni and include_assets) else max(1000, limit * 20)
-    events = db.recent_events(limit=raw_limit, kid=kid, decision=decision)
-    if not include_sni:
-        # Only hide the old passive `sni_only` decision (informational taps).
-        # `tls_failed` is a real signal — pinned-cert app needs passthrough —
-        # and `passthrough` is an audit trail of what we let through. Both
-        # stay visible regardless of the toggle.
-        events = [e for e in events if e.decision != "sni_only"]
-    if not include_assets:
-        # tls_failed / passthrough have kind="unknown" (or None) since there's
-        # no request body to classify — always keep them visible.
-        events = [
-            e for e in events
-            if (e.kind or "page") == "page"
-            or e.decision in ("tls_failed", "passthrough")
-        ]
-    return events[:limit]
-
-
 @router.get("")
 def list_activity(
     kid: str | None = None,
     decision: str | None = None,
-    sni: bool = False,
-    assets: bool = False,
     limit: int = 50,
 ) -> dict:
-    events = _filtered_events(kid, decision, sni, assets, limit=limit)
+    """Most-recently-touched events first.
+
+    Returns dedup'd rows: a single (kid, host, path, query, decision)
+    inside one session window appears once with `hit_count` showing how
+    many hits it absorbed. Both newly inserted and bumped rows surface
+    here on each refetch.
+    """
+    events = db.recent_events(limit=limit, kid=kid, decision=decision)
     return {"events": [event_dto(e) for e in events]}
 
 
 @router.get("/stream")
 async def activity_stream(request: Request) -> EventSourceResponse:
-    """Server-Sent Events: emits one `data:` per event as `publish()` fires.
+    """Server-Sent Events: emits a `changed` ping per ingested event.
 
-    The keepalive ping keeps NAT and proxy timeouts at bay."""
+    Payload is a tiny `{"kind":"changed","kid":"<name>"}`. The SPA
+    invalidates its activity + stats query caches on each ping. Coarse
+    on purpose — the cost of refetching a 50-row list is negligible at
+    this scale and the alternative (push individual rows into the
+    cache) is what caused the SSE/paged-cache drift the user reported.
+    """
     async def gen():
         async for ev in pubsub.subscribe():
             if await request.is_disconnected():

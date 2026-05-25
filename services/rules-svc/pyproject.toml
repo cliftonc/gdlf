@@ -21,9 +21,24 @@ dependencies = [
     "google-auth>=2.35",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    # SQLAlchemy 2.x deprecation noise from SQLModel internals — not our bug
+    # and dominates the output otherwise.
+    "ignore::DeprecationWarning:sqlalchemy",
+    "ignore::DeprecationWarning:sqlmodel",
+]

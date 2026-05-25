@@ -61,7 +61,8 @@ function RuleEditPage() {
                   idx: idxNum,
                   body: {
                     action: values.action,
-                    match: values.match,
+                    host: values.host,
+                    path: values.path || null,
                     query: values.query || null,
                     flag: values.flag,
                     note: values.note || null,

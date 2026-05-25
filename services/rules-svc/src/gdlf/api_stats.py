@@ -1,7 +1,10 @@
-"""Per-kid activity overview, backed by the `domain_stats` rollup.
+"""Per-kid activity overview, derived from the `event` table.
 
-Replaces the need to scan `events` for a "what's each kid doing right now"
-view — `domain_stats` is two orders of magnitude smaller and pre-aggregated.
+`aggregates.overview_for_kids` and `top_hosts_24h_for_kid` run pure SQL
+GROUP BYs over `event` (no in-memory accumulator). Each row carries a
+`hit_count` from the session-window upsert, so `SUM(hit_count)` here
+equals the visible activity feed for the same window — the counters
+and the log measure the same population.
 """
 from __future__ import annotations
 

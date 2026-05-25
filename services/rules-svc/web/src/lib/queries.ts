@@ -11,6 +11,7 @@ import {
   KidStatsSchema,
   KidSummarySchema,
   MdmCommandsSchema,
+  ResourceListSchema,
   ServiceCatalogSchema,
   SettingsSchema,
   ShortlinkSchema,
@@ -25,6 +26,7 @@ import {
   type KidStatsDetail,
   type KidSummary,
   type MdmCommands,
+  type ResourceList,
   type ServiceCatalog,
   type Settings,
   type Shortlink,
@@ -50,13 +52,12 @@ export const qk = {
   services: ["services"] as const,
   ruleSuggest: (host: string, path: string) => ["rule-suggest", host, path] as const,
   mdmCommands: (ip: string) => ["mdm-commands", ip] as const,
+  resources: ["resources"] as const,
 };
 
 export type ActivityParams = {
   kid?: string | null;
   decision?: string | null;
-  sni?: boolean;
-  assets?: boolean;
   limit?: number;
 };
 
@@ -175,8 +176,6 @@ export function useActivity(params: ActivityParams) {
       const search = new URLSearchParams();
       if (params.kid) search.set("kid", params.kid);
       if (params.decision) search.set("decision", params.decision);
-      if (params.sni) search.set("sni", "true");
-      if (params.assets) search.set("assets", "true");
       if (params.limit) search.set("limit", String(params.limit));
       const qs = search.toString();
       const data = await api<{ events: unknown[] }>(`/api/activity${qs ? "?" + qs : ""}`);
@@ -248,6 +247,18 @@ export function useMdmCommands(ip: string, enabled = true) {
   });
 }
 
+export function useResources() {
+  return useQuery({
+    queryKey: qk.resources,
+    queryFn: async () => {
+      const data = await api<unknown>("/api/resources");
+      return ResourceListSchema.parse(data) as ResourceList;
+    },
+    refetchInterval: 5_000,
+    staleTime: 2_500,
+  });
+}
+
 export function useRuleSuggest(host: string, path: string, enabled = true) {
   return useQuery({
     queryKey: qk.ruleSuggest(host, path),
@@ -255,7 +266,9 @@ export function useRuleSuggest(host: string, path: string, enabled = true) {
       const search = new URLSearchParams();
       if (host) search.set("host", host);
       if (path) search.set("path", path);
-      const data = await api<{ suggested: string }>(`/api/rules/suggest?${search.toString()}`);
+      const data = await api<{
+        suggested: { host: string; path: string | null };
+      }>(`/api/rules/suggest?${search.toString()}`);
       return data.suggested;
     },
     enabled: enabled && (!!host || !!path),

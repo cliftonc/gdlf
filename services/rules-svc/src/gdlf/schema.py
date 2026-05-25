@@ -137,11 +137,21 @@ class Schedule(BaseModel):
 
 
 class URLRule(BaseModel):
-    """A single mitmproxy-level rule. `match` is a host+path glob; `query` is
-    an optional regex against the query string."""
+    """A single URL-rule.
+
+    `host` is a glob applied to the SNI / Host header. `path` and `query`
+    are only enforced when the host is on the kid's MITM list — without
+    decryption we can't see them, so for non-MITM hosts the rule degrades
+    to a domain-only match. Writing a rule with a path therefore implicitly
+    requires adding the host to MITM if you want path-level granularity.
+
+    `path` is a glob anchored at the start (trailing `/*` matches anything).
+    `query` is a regex applied to the raw query string.
+    """
     model_config = ConfigDict(extra="forbid")
     action: RuleAction
-    match: str
+    host: str
+    path: str | None = None
     query: str | None = None
     flag: bool = False
     note: str | None = None
@@ -166,14 +176,19 @@ class Kid(BaseModel):
     # Parent-toggled "off switch" for the whole kid. When true, every one of
     # their devices is added to nftables' blocked_clients (overrides bonus).
     manual_block: bool = False
-    # Hosts (fnmatch globs) that mitmproxy should let through untouched — for
-    # pinned-cert apps that refuse our CA. Matched against TLS SNI.
+    # Hosts (fnmatch globs) for which mitmproxy DECRYPTS to enforce URL-path
+    # rules. Matched against TLS SNI in `tls_clienthello`. Defaults to empty:
+    # combined with `INSPECT_GLOBAL_DEFAULTS`, the kid gets path inspection
+    # for the small set of domains where it actually pays off (YouTube etc).
+    # Everything else is spliced (TLS tunneled untouched) — pinned-cert apps
+    # Just Work, and DNS + SNI handle policy at domain granularity.
+    mitm_inspect_hosts: list[str] = []
+    # Legacy: hosts (fnmatch globs) that mitmproxy lets through untouched.
+    # Under splice-by-default this is now redundant — kept for one release as
+    # belt-and-suspenders. Wins over inspect when both match.
     mitm_passthrough_hosts: list[str] = []
-    # Registrable domains (eTLD+1, e.g. "tiktok.com") the parent explicitly
-    # opted *out* of auto-passthrough. New TLS failures matching one of these
-    # are NOT auto-added to `mitm_passthrough_hosts`; toggling a group off in
-    # the Passthrough tab records the registrable here so the next retry from
-    # the device doesn't re-enable it.
+    # Legacy companion to `mitm_passthrough_hosts`. Becomes a no-op under
+    # splice-by-default; kept for schema continuity.
     mitm_passthrough_disabled: list[str] = []
 
 

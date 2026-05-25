@@ -103,7 +103,10 @@ export type MdmCommands = z.infer<typeof MdmCommandsSchema>;
 
 export const RuleSchema = z.object({
   action: RuleActionEnum,
-  match: z.string(),
+  host: z.string(),
+  // Path is MITM-only: enforced only when the host is on the kid's MITM
+  // list. For non-MITM hosts the rule degrades to a host-only match.
+  path: z.string().nullable().default(null),
   query: z.string().nullable(),
   flag: z.boolean(),
   note: z.string().nullable(),
@@ -174,6 +177,7 @@ export const KidDetailSchema = z.object({
   schedule: ScheduleSchema,
   blocked_apps: z.array(z.string()),
   keyword_flags: z.array(z.string()),
+  mitm_inspect_hosts: z.array(z.string()).default([]),
   mitm_passthrough_hosts: z.array(z.string()),
   mitm_passthrough_disabled: z.array(z.string()).default([]),
   devices: z.array(DeviceSchema),
@@ -183,13 +187,20 @@ export type KidDetail = z.infer<typeof KidDetailSchema>;
 
 export const EventSchema = z.object({
   id: z.number().nullable(),
+  // First seen (server `ts`) and last seen (server `ts_last`). The UI
+  // sorts and renders against `ts_last`; `ts` is kept for forensic
+  // context. `.nullish()` keeps an older bundle compatible with the
+  // pre-Phase-1 server (and vice versa).
   ts: z.string().nullable(),
+  ts_last: z.string().nullish(),
+  hit_count: z.number().default(1),
   source: z.string(),
   client_ip: z.string(),
   kid: z.string().nullable(),
   device: z.string().nullable(),
   method: z.string().nullable(),
   host: z.string(),
+  registrable: z.string().nullish(),
   path: z.string().nullable(),
   query: z.string().nullable(),
   status: z.number().nullable(),
@@ -238,6 +249,7 @@ export const TlsFailureChildSchema = z.object({
   device: z.string().nullable(),
   client_ip: z.string(),
   count: z.number(),
+  error: z.string().nullish(),
   ts_first: z.string().nullable(),
   ts_last: z.string().nullable(),
 });
@@ -252,9 +264,13 @@ export type BulkCdnGroup = z.infer<typeof BulkCdnGroupSchema>;
 export const TlsFailureGroupSchema = z.object({
   registrable: z.string(),
   kid: z.string().nullable(),
+  // Legacy field — server stopped emitting `enabled` when auto-passthrough
+  // was removed. Default true keeps old SPA bundles working against the new
+  // backend (and vice versa).
   enabled: z.boolean().default(true),
   count: z.number(),
   ts_last: z.string().nullable(),
+  error: z.string().nullish(),
   children: z.array(TlsFailureChildSchema),
 });
 export type TlsFailureGroup = z.infer<typeof TlsFailureGroupSchema>;
@@ -301,3 +317,17 @@ export const ServiceCatalogSchema = z.object({
   services: z.array(ServiceSchema),
 });
 export type ServiceCatalog = z.infer<typeof ServiceCatalogSchema>;
+
+export const ResourceContainerSchema = z.object({
+  name: z.string(),
+  state: z.string(),
+  cpu_percent: z.number().nullable(),
+  mem_used_bytes: z.number(),
+  mem_limit_bytes: z.number(),
+});
+export type ResourceContainer = z.infer<typeof ResourceContainerSchema>;
+
+export const ResourceListSchema = z.object({
+  containers: z.array(ResourceContainerSchema),
+});
+export type ResourceList = z.infer<typeof ResourceListSchema>;

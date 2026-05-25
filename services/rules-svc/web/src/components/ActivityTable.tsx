@@ -32,6 +32,16 @@ function formatTime(iso: string | null): string {
   return new Date(iso).toLocaleTimeString([], { hour12: false });
 }
 
+// The server collapses same-bucket repeats into one row with hit_count > 1.
+// Render that as "×N" next to the URL so the parent can see at a glance
+// how many real hits a single visible row represents — the counter tiles
+// add up to SUM(hit_count) over the visible window, so this is the same
+// number the overview is counting.
+function hitCountLabel(n: number): string | null {
+  if (!n || n <= 1) return null;
+  return `×${n}`;
+}
+
 // Compound second-level public suffixes that appear in kid browsing often
 // enough to be worth special-casing. A full Public Suffix List (~50 KB)
 // would be more correct but the wrong-bolding for the long tail is purely
@@ -111,10 +121,10 @@ export function ActivityTable({
       </TableHeader>
       <TableBody items={events}>
         {(e) => (
-          <TableRow key={`${e.id ?? "live"}-${e.ts}-${e.host}`}>
+          <TableRow key={`${e.id ?? "live"}-${e.ts_last ?? e.ts}-${e.host}`}>
             <TableCell>
               <span className="font-mono text-[11px] text-default-500 whitespace-nowrap">
-                {formatTime(e.ts)}
+                {formatTime(e.ts_last ?? e.ts)}
               </span>
             </TableCell>
             <TableCell>
@@ -189,6 +199,7 @@ export function ActivityTable({
 function HostUrl({ event: e }: { event: Event }) {
   const [prefix, registrable] = splitHost(e.host);
   const titleFull = `${e.host}${e.path ?? ""}${e.query ? `?${e.query}` : ""}`;
+  const hits = hitCountLabel(e.hit_count);
   return (
     <a
       href={`https://${e.host}${e.path ?? ""}`}
@@ -201,6 +212,9 @@ function HostUrl({ event: e }: { event: Event }) {
       <span className="font-semibold">{registrable}</span>
       {e.path}
       {e.query ? <span className="text-default-300">?{e.query}</span> : null}
+      {hits && (
+        <span className="ml-2 text-default-400 font-sans">{hits}</span>
+      )}
     </a>
   );
 }

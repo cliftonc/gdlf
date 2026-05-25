@@ -30,10 +30,16 @@ class Settings:
     # slower cadence to reclaim disk space.
     retention_days: int
     max_events: int
-    # Counter buckets (domain_stats) — feed the overview dashboard. Separate
-    # retention so we can keep aggregate signal longer than raw events.
-    stats_retention_days: int
+    # Session-window size for activity-log dedup. Same-bucket repeats
+    # (kid, host, path, query, decision) collapse into one row with
+    # `hit_count` bumped; a 5-minute default means a 10-minute YouTube
+    # session shows as ~2 rows with `×N`. Counter tiles also use this
+    # bucket size for the sparkline grid.
     stats_bucket_secs: int
+    # Kept for backwards compatibility with older `.env` files; no longer
+    # consumed (the accumulator-based flush is gone). Safe to remove next
+    # release.
+    stats_retention_days: int
     stats_flush_secs: int
     # Public origin of the MDM endpoints; embedded in enrollment profiles.
     # e.g. "https://gdlf.cliftonc.nl:8443". Empty disables /mdm/* routes.

@@ -42,11 +42,14 @@ isn't directly forwarding packets goes through here.
 | `settings.py`    | Frozen dataclass from env vars (`from .settings import settings`).    |
 | `wg.py`          | X25519 keypair gen, IP allocation, wg0.conf rendering, docker exec.   |
 | `rules.py`       | URL-rule evaluator + `suggest_match()` helper.                        |
-| `db.py`          | SQLModel Event/Handshake/AlertLog; `recent_events`, `prune`, `vacuum`.|
+| `db.py`          | SQLModel Event/Handshake/AlertLog + MDM tables; `insert_or_bump` (session-window upsert), `recent_events`, `prune`, `vacuum`. |
+| `aggregates.py`  | Per-kid counters derived from `event` via SQL aggregation (no in-memory accumulator). |
+| `api_stats.py`   | `/api/stats/overview` and `/api/stats/kid/{name}` — wraps `aggregates`. |
+| `api_tls_failures.py` | `/api/tls-failures` — reads `event` rows with `decision='tls_failed'`, grouped by registrable domain. |
 | `adguard.py`     | REST-API client + 60s sync loop.                                      |
 | `alerts.py`      | Webhook + SMTP dispatcher; logs each attempt to `AlertLog`.           |
 | `auth.py`        | HMAC cookie token primitives.                                         |
-| `addons/mitm_capture.py` | mitmproxy addon (mounted into the mitm container).            |
+| `addons/mitm_capture.py` | mitmproxy addon (mounted into the mitm container). Splice-by-default in `tls_clienthello`: only SNIs in `INSPECT_GLOBAL_DEFAULTS` (bulk_cdns.py) ∪ per-kid `mitm_inspect_hosts` get terminated for URL-path rules. Everything else is `ignore_connection = True`. |
 | `web/`           | Vite + React + TypeScript SPA (HeroUI, TanStack, zod, Tailwind).      |
 
 ## How it talks to other services
@@ -105,15 +108,21 @@ isn't directly forwarding packets goes through here.
   hourly prune deadlocked occasionally in default journal mode. Enabled in
   `db.engine()`.
 
-* **Detached-instance SQLAlchemy errors.** After `db.insert(ev)` the
-  session is closed, so `ev.decision` etc. raise `DetachedInstanceError`.
-  The `/api/events` handler builds the SSE DTO from the inbound payload,
-  not the ORM instance, to avoid this. Same trick for the alert-firing
-  branch — pass `payload` not `ev`.
+* **Activity ingest is a single SQL upsert.** `/api/events` calls
+  `db.insert_or_bump`, which is one `INSERT ... ON CONFLICT DO UPDATE`
+  keyed on `(kid, host, path, query, decision, bucket_ts)`. Same-bucket
+  repeats collapse onto an existing row with `hit_count += 1`. This is
+  the only writer; counters (`/api/stats/*`), the feed
+  (`/api/activity`), and SSE all read from the same `event` table, so
+  the displayed numbers always match the rows in the feed.
 
-* **SSE fanout drops on slow consumers.** `pubsub.publish()` does
-  `put_nowait` against a bounded queue (depth 100). Slow subscribers miss
-  events rather than block the writer.
+* **SSE is a change-ping, not a row stream.** `pubsub.publish()` emits
+  one `{"kind":"changed","kid":<name>}` per ingest; the SPA's
+  `useActivityStream` debounces and `invalidateQueries` so it
+  refetches `/api/activity` + the stats endpoints. The bounded
+  per-subscriber queue (depth 100) still drops on overflow, but the
+  payload is coalescable — a missed ping is recovered by the next one
+  (and by the 5s polling fallback in `useActivityStream`).
 
 * **Mitmproxy addon lives here, runs there.** `addons/mitm_capture.py` is
   mounted read-only into `gdlf-mitm` at `/addons/`. Edit here, rebuild
@@ -441,6 +450,9 @@ Don't look for these — they don't exist:
 ## Tests / smoke
 
 ```bash
+# Activity ingest + counter consistency tests
+cd services/rules-svc && pip install -e ".[dev]" && pytest tests/
+
 # Decision API end-to-end (must stay byte-identical)
 curl -s -X POST http://localhost:8080/api/decision -H 'content-type: application/json' \
   -d '{"client_ip":"10.13.13.3","host":"youtube.com","path":"/shorts/x"}'

@@ -27,13 +27,12 @@ import {
 import {
   useDeleteKid,
   useKidBlock,
-  useAddPassthrough,
-  useRemovePassthrough,
+  useAddInspect,
+  useRemoveInspect,
   useSetBlockedApps,
-  useTogglePassthroughGroup,
   useDismissTlsFailure,
 } from "../lib/mutations";
-import type { Service, TlsFailureGroup } from "../lib/schemas";
+import type { Service } from "../lib/schemas";
 import { useConfirm } from "../lib/hooks/useConfirm";
 import { DeviceRow } from "../components/DeviceRow";
 import { KidStatsPanel } from "../components/KidStatsPanel";
@@ -48,7 +47,7 @@ const TabEnum = z.enum([
   "schedule",
   "rules",
   "services",
-  "passthrough",
+  "mitm",
   "activity",
 ]);
 
@@ -159,10 +158,10 @@ function KidDetailPage() {
           <ServicesTab name={name} blockedApps={k.blocked_apps} />
         </Tab>
         <Tab
-          key="passthrough"
-          title={`Passthrough (${k.mitm_passthrough_hosts.length})`}
+          key="mitm"
+          title={`MITM (${k.mitm_inspect_hosts.length})`}
         >
-          <PassthroughTab name={name} hosts={k.mitm_passthrough_hosts} />
+          <MitmTab name={name} hosts={k.mitm_inspect_hosts} />
         </Tab>
         <Tab key="activity" title="Activity">
           <KidActivityTab name={name} />
@@ -234,18 +233,6 @@ function RulesTab({ name }: { name: string }) {
   );
 }
 
-// "Custom" host = an entry in the kid's passthrough list that isn't the
-// canonical apex / `*.<reg>` form of any observed group. These are the
-// rules the parent typed by hand and we don't want to clobber.
-function customHosts(hosts: string[], groups: TlsFailureGroup[]): string[] {
-  const known = new Set<string>();
-  for (const g of groups) {
-    known.add(g.registrable);
-    known.add(`*.${g.registrable}`);
-  }
-  return hosts.filter((h) => !known.has(h));
-}
-
 function formatRelative(iso: string | null): string {
   if (!iso) return "";
   const t = new Date(iso).getTime();
@@ -259,320 +246,6 @@ function formatRelative(iso: string | null): string {
   return `${d}d ago`;
 }
 
-function PassthroughTab({
-  name,
-  hosts,
-}: {
-  name: string;
-  hosts: string[];
-}) {
-  const failures = useTlsFailures(name);
-  const addHost = useAddPassthrough(name);
-  const removeHost = useRemovePassthrough(name);
-  const toggleGroupMut = useTogglePassthroughGroup(name);
-  const dismiss = useDismissTlsFailure();
-  const [custom, setCustom] = useState("");
-  const [filter, setFilter] = useState("");
-
-  const groups = failures.data ?? [];
-  const manual = useMemo(() => customHosts(hosts, groups), [hosts, groups]);
-
-  // Alphabetical by registrable is the default; search narrows by registrable
-  // OR any child host so pasted-in subdomain queries find their group.
-  const visibleGroups = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    const filtered = q
-      ? groups.filter(
-          (g) =>
-            g.registrable.toLowerCase().includes(q) ||
-            g.children.some((c) => c.host.toLowerCase().includes(q)),
-        )
-      : groups;
-    return [...filtered].sort((a, b) =>
-      a.registrable.localeCompare(b.registrable),
-    );
-  }, [groups, filter]);
-
-  const disabledCount = useMemo(
-    () => groups.filter((g) => !g.enabled).length,
-    [groups],
-  );
-
-  const submitCustom = () => {
-    const v = custom.trim().toLowerCase();
-    if (!v) return;
-    addHost.mutate(v, { onSuccess: () => setCustom("") });
-  };
-
-  return (
-    <div className="flex flex-col gap-6">
-      <div className="text-sm text-default-500 leading-relaxed max-w-3xl">
-        When an app refuses mitmproxy's certificate (pinned-cert apps like
-        TikTok, Instagram, banking) we capture the host here and let it
-        pass through untouched by default — DNS-level blocking still
-        applies, but we lose URL-level visibility for it. Toggle a group
-        off to force mitmproxy to try again (which will usually break the
-        app for that kid).
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-      <div className="flex flex-col gap-6 min-w-0">
-      <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
-            Observed pinned domains
-            {groups.length > 0 && (
-              <span className="ml-2 text-default-400 normal-case font-normal">
-                {groups.length} total
-                {disabledCount > 0 && ` · ${disabledCount} forced MITM`}
-              </span>
-            )}
-          </h2>
-        </div>
-        <Input
-          size="sm"
-          placeholder="Search domain or host…"
-          value={filter}
-          onValueChange={setFilter}
-          isClearable
-          onClear={() => setFilter("")}
-          className="max-w-sm"
-        />
-        {failures.isLoading && <Spinner size="sm" />}
-        {!failures.isLoading && groups.length === 0 && (
-          <EmptyState
-            title="No TLS failures observed yet"
-            body="When a pinned-cert app fails, it'll appear here grouped by domain — passthrough is on by default."
-          />
-        )}
-        {groups.length > 0 && visibleGroups.length === 0 && (
-          <p className="text-xs text-default-400 italic">
-            No domains match "{filter}".
-          </p>
-        )}
-        {visibleGroups.length > 0 && (
-          <Accordion variant="bordered" selectionMode="multiple" isCompact>
-            {visibleGroups.map((g) => (
-              <AccordionItem
-                key={g.registrable}
-                aria-label={g.registrable}
-                title={
-                  <div className="flex items-center justify-between gap-3 pr-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="font-mono text-sm truncate">
-                        {g.registrable}
-                      </span>
-                      <Chip size="sm" variant="flat" color="default">
-                        {g.children.length}
-                        {g.children.length === 1 ? " host" : " hosts"}
-                      </Chip>
-                      <span className="text-xs text-default-400 whitespace-nowrap">
-                        {formatRelative(g.ts_last)}
-                      </span>
-                    </div>
-                    <div onClick={(e) => e.stopPropagation()}>
-                      <Switch
-                        size="sm"
-                        isSelected={g.enabled}
-                        onValueChange={(v) =>
-                          toggleGroupMut.mutate({
-                            registrable: g.registrable,
-                            enabled: v,
-                          })
-                        }
-                        isDisabled={
-                          toggleGroupMut.isPending &&
-                          toggleGroupMut.variables?.registrable ===
-                            g.registrable
-                        }
-                        color="primary"
-                      >
-                        {g.enabled ? "Passthrough" : "Forced MITM"}
-                      </Switch>
-                    </div>
-                  </div>
-                }
-              >
-                <ul className="flex flex-col gap-1 pl-1">
-                  {g.children.map((c) => (
-                    <li
-                      key={`${c.id}-${c.host}`}
-                      className="flex items-center justify-between gap-2 py-1"
-                    >
-                      <div className="flex flex-col min-w-0">
-                        <span className="font-mono text-xs truncate">
-                          {c.host}
-                        </span>
-                        <span className="text-[11px] text-default-400">
-                          {c.count}× · last {formatRelative(c.ts_last)}
-                          {c.device && ` · ${c.device}`}
-                        </span>
-                      </div>
-                      {c.id != null && (
-                        <Button
-                          size="sm"
-                          variant="light"
-                          color="default"
-                          isLoading={
-                            dismiss.isPending && dismiss.variables === c.id
-                          }
-                          onPress={() => dismiss.mutate(c.id as number)}
-                        >
-                          Dismiss
-                        </Button>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </AccordionItem>
-            ))}
-          </Accordion>
-        )}
-      </section>
-
-      <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
-          Custom rules
-        </h2>
-        <p className="text-xs text-default-400">
-          fnmatch globs for hosts you want to allow before they ever fail —
-          e.g. <span className="font-mono">*.bank.example</span>.
-        </p>
-        <div className="flex gap-2">
-          <Input
-            size="sm"
-            placeholder="e.g. *.tiktok.com"
-            value={custom}
-            onValueChange={setCustom}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submitCustom();
-            }}
-            className="flex-1"
-          />
-          <Button
-            color="primary"
-            onPress={submitCustom}
-            isLoading={addHost.isPending}
-            isDisabled={!custom.trim()}
-          >
-            Add
-          </Button>
-        </div>
-        {manual.length === 0 ? (
-          <p className="text-xs text-default-400 italic">No custom rules.</p>
-        ) : (
-          <ul className="flex flex-col gap-1">
-            {manual.map((h) => (
-              <li
-                key={h}
-                className="flex items-center justify-between gap-2 rounded-md border border-default-200 px-3 py-2"
-              >
-                <span className="font-mono text-sm">{h}</span>
-                <Button
-                  size="sm"
-                  variant="light"
-                  color="danger"
-                  isLoading={
-                    removeHost.isPending && removeHost.variables === h
-                  }
-                  onPress={() => removeHost.mutate(h)}
-                >
-                  Remove
-                </Button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      </div>
-
-      <BulkCdnPanel />
-      </div>
-    </div>
-  );
-}
-
-function BulkCdnPanel() {
-  const cdns = useBulkCdns();
-  const [filter, setFilter] = useState("");
-
-  const groups = cdns.data?.groups ?? [];
-  const visible = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return groups;
-    return groups
-      .map((g) => ({
-        ...g,
-        patterns: g.patterns.filter((p) => p.toLowerCase().includes(q)),
-      }))
-      .filter(
-        (g) =>
-          g.vendor.toLowerCase().includes(q) || g.patterns.length > 0,
-      );
-  }, [groups, filter]);
-
-  return (
-    <section className="flex flex-col gap-2 min-w-0">
-      <div className="flex items-baseline justify-between gap-3 flex-wrap">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
-          Global CDN defaults
-        </h2>
-        {cdns.data && (
-          <span className="text-xs text-default-400">
-            {cdns.data.total} patterns
-          </span>
-        )}
-      </div>
-      <p className="text-xs text-default-400">
-        TLS passthrough applied to every kid for bulk-content CDNs (game
-        downloads, OS updates, speed tests). Edit in{" "}
-        <span className="font-mono">services/rules-svc/src/gdlf/bulk_cdns.py</span>
-        .
-      </p>
-      <Input
-        size="sm"
-        placeholder="Search vendor or pattern…"
-        value={filter}
-        onValueChange={setFilter}
-        isClearable
-        onClear={() => setFilter("")}
-      />
-      {cdns.isLoading && <Spinner size="sm" />}
-      {cdns.error && (
-        <p className="text-xs text-danger">Couldn't load CDN list.</p>
-      )}
-      {!cdns.isLoading && visible.length === 0 && (
-        <p className="text-xs text-default-400 italic">No matches.</p>
-      )}
-      {visible.length > 0 && (
-        <Accordion variant="bordered" selectionMode="multiple" isCompact>
-          {visible.map((g) => (
-            <AccordionItem
-              key={g.vendor}
-              aria-label={g.vendor}
-              title={
-                <div className="flex items-center gap-2 min-w-0 pr-2">
-                  <span className="text-sm truncate">{g.vendor}</span>
-                  <Chip size="sm" variant="flat" color="default">
-                    {g.patterns.length}
-                  </Chip>
-                </div>
-              }
-            >
-              <ul className="flex flex-col gap-0.5 pl-1">
-                {g.patterns.map((p) => (
-                  <li key={p} className="font-mono text-xs text-default-600">
-                    {p}
-                  </li>
-                ))}
-              </ul>
-            </AccordionItem>
-          ))}
-        </Accordion>
-      )}
-    </section>
-  );
-}
 
 function humanizeGroupId(gid: string): string {
   if (!gid) return "";
@@ -786,6 +459,221 @@ function ServiceCard({
         aria-label={`Block ${service.name}`}
       />
     </label>
+  );
+}
+
+function MitmTab({
+  name,
+  hosts,
+}: {
+  name: string;
+  hosts: string[];
+}) {
+  const addHost = useAddInspect(name);
+  const removeHost = useRemoveInspect(name);
+  const failures = useTlsFailures(name);
+  const dismiss = useDismissTlsFailure();
+  const cdns = useBulkCdns();
+  const [custom, setCustom] = useState("");
+
+  const submit = () => {
+    const v = custom.trim().toLowerCase();
+    if (!v) return;
+    addHost.mutate(v, { onSuccess: () => setCustom("") });
+  };
+
+  const pinned = failures.data ?? [];
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="text-sm text-default-500 leading-relaxed max-w-3xl">
+        Splice-by-default: every HTTPS connection is tunneled untouched
+        unless its SNI matches a host below. Hosts on this list are{" "}
+        <strong>decrypted</strong> by mitmproxy so URL rules can fire on
+        paths (e.g. <span className="font-mono">youtube.com/shorts/*</span>).
+        Keep the list small — each entry is a potential pinning failure
+        (banking apps, social-media SDKs, etc.).
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <div className="flex flex-col gap-6 min-w-0">
+          <section className="flex flex-col gap-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
+              MITM hosts
+            </h2>
+            <div className="flex gap-2">
+              <Input
+                size="sm"
+                placeholder="e.g. *.example.com"
+                value={custom}
+                onValueChange={setCustom}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit();
+                }}
+                className="flex-1"
+              />
+              <Button
+                color="primary"
+                onPress={submit}
+                isLoading={addHost.isPending}
+                isDisabled={!custom.trim()}
+              >
+                Add
+              </Button>
+            </div>
+            {hosts.length === 0 ? (
+              <p className="text-xs text-default-400 italic">
+                No MITM hosts. Everything is spliced — add a glob above to
+                decrypt that domain for URL-path rules.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-1">
+                {hosts.map((h) => (
+                  <li
+                    key={h}
+                    className="flex items-center justify-between gap-2 rounded-md border border-default-200 px-3 py-2"
+                  >
+                    <span className="font-mono text-sm">{h}</span>
+                    <Button
+                      size="sm"
+                      variant="light"
+                      color="danger"
+                      isLoading={removeHost.isPending && removeHost.variables === h}
+                      onPress={() => removeHost.mutate(h)}
+                    >
+                      Remove
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="flex flex-col gap-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
+              Pinned-cert rejections
+              {pinned.length > 0 && (
+                <span className="ml-2 text-default-400 normal-case font-normal">
+                  {pinned.length} domain{pinned.length === 1 ? "" : "s"}
+                </span>
+              )}
+            </h2>
+            <p className="text-xs text-default-400">
+              MITM hosts whose apps refused our cert. They can't be
+              decrypted — remove them here or accept that they'll break.
+            </p>
+            {failures.isLoading && <Spinner size="sm" />}
+            {!failures.isLoading && pinned.length === 0 && (
+              <p className="text-xs text-default-400 italic">
+                No pinned-cert rejections. Steady state should stay empty.
+              </p>
+            )}
+            {pinned.length > 0 && (
+              <Accordion variant="bordered" selectionMode="multiple" isCompact>
+                {pinned.map((g) => (
+                  <AccordionItem
+                    key={g.registrable}
+                    aria-label={g.registrable}
+                    title={
+                      <div className="flex items-center gap-2 min-w-0 pr-2">
+                        <span className="font-mono text-sm truncate">
+                          {g.registrable}
+                        </span>
+                        <Chip size="sm" variant="flat" color="warning">
+                          {g.children.length}
+                          {g.children.length === 1 ? " host" : " hosts"}
+                        </Chip>
+                        <span className="text-xs text-default-400 whitespace-nowrap">
+                          {formatRelative(g.ts_last)}
+                        </span>
+                      </div>
+                    }
+                  >
+                    <ul className="flex flex-col gap-1 pl-1">
+                      {g.children.map((c) => (
+                        <li
+                          key={`${c.id}-${c.host}`}
+                          className="flex items-start justify-between gap-2 py-1"
+                        >
+                          <div className="flex flex-col gap-0.5 min-w-0">
+                            <span className="font-mono text-xs truncate">{c.host}</span>
+                            <span className="text-[11px] text-default-400">
+                              {c.count}× · last {formatRelative(c.ts_last)}
+                              {c.device && ` · ${c.device}`}
+                            </span>
+                            {c.error && (
+                              <span className="text-[11px] text-warning-600 font-mono break-all">
+                                {c.error}
+                              </span>
+                            )}
+                          </div>
+                          {c.id != null && (
+                            <Button
+                              size="sm"
+                              variant="light"
+                              color="default"
+                              isLoading={
+                                dismiss.isPending && dismiss.variables === c.id
+                              }
+                              onPress={() => dismiss.mutate(c.id as number)}
+                            >
+                              Dismiss
+                            </Button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </AccordionItem>
+                ))}
+              </Accordion>
+            )}
+          </section>
+        </div>
+
+        <aside className="flex flex-col gap-2 min-w-0">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
+            Bulk-CDN splice list
+            {cdns.data && (
+              <span className="ml-2 text-default-400 normal-case font-normal">
+                {cdns.data.total} patterns
+              </span>
+            )}
+          </h2>
+          <p className="text-xs text-default-400">
+            Spliced unconditionally regardless of any MITM entry. Game
+            downloads, OS updates, video-segment CDNs — bulk binary
+            traffic we'd never want to decrypt. Edit in{" "}
+            <span className="font-mono">services/rules-svc/src/gdlf/bulk_cdns.py</span>.
+          </p>
+          {cdns.data && cdns.data.groups.length > 0 && (
+            <Accordion variant="bordered" selectionMode="multiple" isCompact>
+              {cdns.data.groups.map((g) => (
+                <AccordionItem
+                  key={g.vendor}
+                  aria-label={g.vendor}
+                  title={
+                    <div className="flex items-center gap-2 min-w-0 pr-2">
+                      <span className="text-sm truncate">{g.vendor}</span>
+                      <Chip size="sm" variant="flat" color="default">
+                        {g.patterns.length}
+                      </Chip>
+                    </div>
+                  }
+                >
+                  <ul className="flex flex-col gap-0.5 pl-1">
+                    {g.patterns.map((p) => (
+                      <li key={p} className="font-mono text-xs text-default-600">
+                        {p}
+                      </li>
+                    ))}
+                  </ul>
+                </AccordionItem>
+              ))}
+            </Accordion>
+          )}
+        </aside>
+      </div>
+    </div>
   );
 }
 

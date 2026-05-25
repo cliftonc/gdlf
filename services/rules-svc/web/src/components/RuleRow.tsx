@@ -23,10 +23,11 @@ export function RuleRow({
   const move = useMoveRule(kidName);
   const confirm = useConfirm();
 
+  const summary = rule.host + (rule.path ?? "");
   const onDelete = async () => {
     const ok = await confirm({
       title: "Delete rule?",
-      body: rule.match,
+      body: summary,
       confirmLabel: "Delete rule",
       danger: true,
     });
@@ -45,7 +46,12 @@ export function RuleRow({
               flag
             </Chip>
           )}
-          <span className="font-mono text-sm truncate">{rule.match}</span>
+          <span className="font-mono text-sm truncate">
+            {rule.host}
+            {rule.path && (
+              <span className="text-default-500">{rule.path}</span>
+            )}
+          </span>
         </div>
         {rule.query && (
           <p className="text-xs text-default-500 font-mono truncate">query: {rule.query}</p>

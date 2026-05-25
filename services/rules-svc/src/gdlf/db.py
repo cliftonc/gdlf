@@ -1,63 +1,68 @@
-"""Ephemeral SQLite for request events, AdGuard log entries, handshake state.
+"""Ephemeral SQLite for request events, handshake state, MDM bookkeeping.
 
 This is *not* the source of truth — kids.yaml is. The DB is fine to wipe.
+
+The `event` table is the single source of truth for activity logging. Both
+the live feed (`/api/activity` + SSE) and the counter overview
+(`/api/stats/*`) read from it directly. Rows are deduplicated within a
+configurable session window (`settings.stats_bucket_secs`, default 300s)
+keyed on (kid, host, path, query, decision, bucket_ts) — repeat visits
+inside the window bump `hit_count` and `ts_last` on the existing row
+instead of inserting a new one.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import UniqueConstraint, text
+from sqlalchemy import text
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from .settings import settings
 
 
 class Event(SQLModel, table=True):
-    """A single request observed by mitmproxy (or AdGuard, if we ingest those)."""
+    """A network observation by mitmproxy (SNI splice, MITM nav, block, etc.).
+
+    One row per (kid, host, path, query, decision, bucket_ts) — repeat
+    hits in the same session window bump `hit_count` and `ts_last`.
+    """
     id: int | None = Field(default=None, primary_key=True)
+    # First time the row was created (within its bucket). For "newest
+    # activity" use `ts_last` instead.
     ts: datetime = Field(default_factory=datetime.utcnow, index=True)
+    # Last hit observed for this (deduped) row. The feed and counter
+    # queries both sort/window on this.
+    ts_last: datetime = Field(default_factory=datetime.utcnow, index=True)
+    # Number of hits collapsed into this row.
+    hit_count: int = Field(default=1)
+    # `ts` floored to settings.stats_bucket_secs. Part of the dedup key.
+    bucket_ts: datetime = Field(default_factory=datetime.utcnow, index=True)
     source: str  # 'mitmproxy' | 'adguard'
     client_ip: str = Field(index=True)
     kid: str | None = Field(default=None, index=True)
     device: str | None = None
     method: str | None = None
     host: str
+    # eTLD+1 of `host`, set at insert time so counter queries can
+    # `GROUP BY registrable` without re-parsing.
+    registrable: str | None = Field(default=None, index=True)
     path: str | None = None
     query: str | None = None
     status: int | None = None
-    decision: str  # 'allow' | 'block' | 'flag' | 'sni_only' | 'dns_block'
-    rule: str | None = None  # which rule matched, if any
+    decision: str  # 'allow' | 'block' | 'flag' | 'tls_failed' | 'dns_block' | 'passthrough'
+    rule: str | None = None
     sni_only: bool = False
     note: str | None = None
     # Browser hint about what was requested:
-    #   page  (Sec-Fetch-Dest=document/iframe) — a navigation, what we care about by default
-    #   asset (image/script/style/font/video/...) — sub-resource
-    #   xhr   (Sec-Fetch-Dest=empty) — fetch/XHR, often analytics beacons
-    #   unknown — addon couldn't classify (SNI-only event)
+    #   page   — navigation (Sec-Fetch-Dest=document)
+    #   iframe — iframe / nested document
+    #   sni    — SNI-only (spliced TLS, no decryption)
+    #   pinned — MITM-inspected host whose app rejected our cert
+    #   asset/xhr/ws — sub-resource noise (dropped at ingest unless
+    #                  decision in {block,flag,tls_failed,dns_block})
+    #   unknown — classifier was uncertain; treated as a page navigation
     kind: str | None = Field(default=None, index=True)
-
-
-class DomainStat(SQLModel, table=True):
-    """Per-(kid, host, 5-min bucket) rollup of request counts.
-
-    Populated by `aggregates.flush()` every ~30s from an in-memory accumulator
-    fed by `/api/events`. Counters cover every request the addon sees — pages,
-    sub-resources, XHRs, WebSockets — so the dashboard can show a true
-    "what is each kid hitting right now" view without keeping a row per
-    request in the events table.
-
-    The raw `events` table only carries page navigations + blocks/flags now;
-    counters here are the volume signal.
-    """
-    __tablename__ = "domain_stats"
-    kid: str = Field(primary_key=True, index=True)
-    host: str = Field(primary_key=True)
-    bucket_ts: datetime = Field(primary_key=True, index=True)
-    requests: int = 0       # all kinds (page + iframe + asset + xhr + ws)
-    pages: int = 0          # kind in {page, iframe}
-    blocked: int = 0        # decision in {block, flag}
-    last_seen: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Handshake(SQLModel, table=True):
@@ -66,34 +71,6 @@ class Handshake(SQLModel, table=True):
     last_seen: datetime = Field(default_factory=datetime.utcnow)
     bytes_rx: int = 0
     bytes_tx: int = 0
-
-
-class TlsFailure(SQLModel, table=True):
-    """Per-(kid, host) observation of a TLS handshake failure.
-
-    Populated by the mitmproxy addon. The Passthrough tab in the dashboard
-    groups these by registrable domain (eTLD+1) so the parent can enable
-    `*.reddit.com` style passthrough with one switch instead of allowing
-    every subdomain separately.
-
-    Distinct from `Event` because (a) it's a long-lived observation
-    (count + first/last seen, not one-row-per-occurrence), and (b) we want
-    it out of the activity log — pinned-cert apps would otherwise dominate.
-    """
-    __tablename__ = "tls_failures"
-    __table_args__ = (
-        UniqueConstraint("kid", "host", name="uq_tls_failures_kid_host"),
-    )
-    id: int | None = Field(default=None, primary_key=True)
-    ts_first: datetime = Field(default_factory=datetime.utcnow)
-    ts_last: datetime = Field(default_factory=datetime.utcnow, index=True)
-    count: int = 1
-    kid: str | None = Field(default=None, index=True)
-    device: str | None = None
-    client_ip: str
-    host: str = Field(index=True)
-    # Public-suffix-aware registrable domain (eTLD+1) used to group rows.
-    registrable: str = Field(index=True)
 
 
 class AlertLog(SQLModel, table=True):
@@ -186,6 +163,7 @@ class WindowsEnrollToken(SQLModel, table=True):
 
 
 _engine = None
+_EPOCH = datetime(1970, 1, 1)
 
 
 def _db_path() -> Path:
@@ -204,7 +182,57 @@ def engine():
             c.exec_driver_sql("PRAGMA journal_mode=WAL")
             c.exec_driver_sql("PRAGMA synchronous=NORMAL")
         SQLModel.metadata.create_all(_engine)
+        _migrate(_engine)
     return _engine
+
+
+def _migrate(eng) -> None:
+    """Idempotent schema migrations. Runs at every startup.
+
+    Adds the dedup columns to `event` (wiping existing rows — they have no
+    bucket_ts and can't reliably be coerced into the new dedup key) and
+    drops the obsolete `domain_stats` / `tls_failures` rollup tables.
+    """
+    import logging
+    log = logging.getLogger("gdlf.db")
+    with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+        cols = {row[0] for row in c.exec_driver_sql(
+            "SELECT name FROM pragma_table_info('event')"
+        )}
+        if cols and "hit_count" not in cols:
+            # Old schema: clear the events table so the new unique index can
+            # be created without collisions. State is ephemeral by design
+            # (see CLAUDE.md). The accumulator-backed domain_stats rollup
+            # also goes away in this migration.
+            (count,) = c.exec_driver_sql("SELECT COUNT(*) FROM event").one()
+            if count:
+                log.warning(
+                    "wiping %d legacy events while migrating to dedup-based logging",
+                    count,
+                )
+            c.exec_driver_sql("DELETE FROM event")
+            c.exec_driver_sql("ALTER TABLE event ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 1")
+            c.exec_driver_sql("ALTER TABLE event ADD COLUMN ts_last DATETIME")
+            c.exec_driver_sql("ALTER TABLE event ADD COLUMN bucket_ts DATETIME")
+            c.exec_driver_sql("ALTER TABLE event ADD COLUMN registrable TEXT")
+
+        # Indexes the SQLModel definition doesn't create directly.
+        c.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_event_session ON event ("
+            "COALESCE(kid,''), COALESCE(host,''), COALESCE(path,''), "
+            "COALESCE(query,''), COALESCE(decision,''), bucket_ts)"
+        )
+        c.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_event_kid_ts_last ON event (kid, ts_last)"
+        )
+        c.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_event_registrable_ts_last "
+            "ON event (registrable, ts_last)"
+        )
+
+        # Obsolete tables — dropped on first migration after the upgrade.
+        c.exec_driver_sql("DROP TABLE IF EXISTS domain_stats")
+        c.exec_driver_sql("DROP TABLE IF EXISTS tls_failures")
 
 
 def session() -> Session:
@@ -212,117 +240,129 @@ def session() -> Session:
 
 
 def insert(obj) -> None:
+    """Synchronous insert — used for non-Event tables (handshake, alerts,
+    MDM bookkeeping). Activity events go through `insert_or_bump` to get
+    session-window dedup."""
     with session() as s:
         s.add(obj)
         s.commit()
 
 
-def recent_events(limit: int = 200, kid: str | None = None, decision: str | None = None) -> list[Event]:
+def bucket_floor(ts: datetime) -> datetime:
+    """Floor `ts` (naive UTC) to the session-window grid.
+
+    Direct arithmetic against a fixed UTC epoch — `ts.timestamp()` on a
+    naive datetime would interpret it in the container's local timezone
+    (TZ=Europe/London), silently misaligning buckets by 1–2h vs the UTC
+    values we read back.
+    """
+    bucket_secs = max(60, settings.stats_bucket_secs)
+    epoch = int((ts - _EPOCH).total_seconds())
+    return _EPOCH + timedelta(seconds=epoch - (epoch % bucket_secs))
+
+
+def insert_or_bump(
+    *,
+    source: str,
+    client_ip: str,
+    kid: str | None,
+    device: str | None,
+    method: str | None,
+    host: str,
+    registrable: str | None,
+    path: str | None,
+    query: str | None,
+    status: int | None,
+    decision: str,
+    rule: str | None,
+    sni_only: bool,
+    kind: str | None,
+    note: str | None,
+    ts: datetime | None = None,
+) -> tuple[int, bool]:
+    """Insert an event row, or bump (hit_count, ts_last) on an existing
+    same-bucket row.
+
+    Returns (event_id, was_new). `was_new=True` iff a fresh row was
+    inserted; the caller uses this to fire alerts only once per session
+    window per matching event.
+
+    The unique key is (kid, host, path, query, decision, bucket_ts) — see
+    `uq_event_session` in `_migrate()`. Fields that vary across hits
+    (status, rule, note) are filled in on the first row that has them.
+    """
+    now = ts or datetime.utcnow()
+    bucket = bucket_floor(now)
+    sql = text(
+        """
+        INSERT INTO event (
+          ts, ts_last, bucket_ts, hit_count, source, client_ip,
+          kid, device, method, host, registrable, path, query,
+          status, decision, rule, sni_only, kind, note
+        ) VALUES (
+          :ts, :ts, :bucket, 1, :source, :client_ip,
+          :kid, :device, :method, :host, :registrable, :path, :query,
+          :status, :decision, :rule, :sni_only, :kind, :note
+        )
+        ON CONFLICT (
+          COALESCE(kid,''), COALESCE(host,''), COALESCE(path,''),
+          COALESCE(query,''), COALESCE(decision,''), bucket_ts
+        ) DO UPDATE SET
+          hit_count = event.hit_count + 1,
+          ts_last = excluded.ts_last,
+          status = COALESCE(excluded.status, event.status),
+          rule = COALESCE(excluded.rule, event.rule),
+          note = COALESCE(excluded.note, event.note),
+          device = COALESCE(excluded.device, event.device),
+          registrable = COALESCE(excluded.registrable, event.registrable),
+          method = COALESCE(excluded.method, event.method)
+        RETURNING id, hit_count
+        """
+    )
+    params = {
+        "ts": now,
+        "bucket": bucket,
+        "source": source,
+        "client_ip": client_ip,
+        "kid": kid,
+        "device": device,
+        "method": method,
+        "host": host,
+        "registrable": registrable,
+        "path": path,
+        "query": query,
+        "status": status,
+        "decision": decision,
+        "rule": rule,
+        "sni_only": 1 if sni_only else 0,
+        "kind": kind,
+        "note": note,
+    }
     with session() as s:
-        stmt = select(Event).order_by(Event.ts.desc()).limit(limit)
+        row = s.connection().execute(sql, params).first()
+        s.commit()
+    if row is None:
+        return (0, False)
+    event_id, hit_count = int(row[0]), int(row[1])
+    return (event_id, hit_count == 1)
+
+
+def get_event(event_id: int) -> Event | None:
+    with session() as s:
+        return s.get(Event, event_id)
+
+
+def recent_events(limit: int = 200, kid: str | None = None, decision: str | None = None) -> list[Event]:
+    """Most-recently-touched events first (ordered by `ts_last`).
+
+    Both newly-inserted rows and bumped rows surface here in real-time.
+    """
+    with session() as s:
+        stmt = select(Event).order_by(Event.ts_last.desc()).limit(limit)
         if kid:
             stmt = stmt.where(Event.kid == kid)
         if decision:
             stmt = stmt.where(Event.decision == decision)
-        return list(s.exec(stmt).all())
-
-
-def upsert_tls_failure(
-    *,
-    kid: str | None,
-    device: str | None,
-    client_ip: str,
-    host: str,
-    registrable: str,
-) -> None:
-    """Insert or bump-the-counter for a (kid, host) TLS failure observation.
-
-    `kid` may be None when the source IP doesn't resolve to a known device
-    (orphaned WG peer). We still store those — at least the parent can see
-    something failed somewhere, and they get pruned naturally over time.
-    """
-    now = datetime.utcnow()
-    with session() as s:
-        stmt = select(TlsFailure).where(
-            TlsFailure.kid == kid,
-            TlsFailure.host == host,
-        )
-        existing = s.exec(stmt).first()
-        if existing:
-            existing.ts_last = now
-            existing.count += 1
-            existing.client_ip = client_ip
-            if device:
-                existing.device = device
-            s.add(existing)
-        else:
-            s.add(
-                TlsFailure(
-                    kid=kid,
-                    device=device,
-                    client_ip=client_ip,
-                    host=host,
-                    registrable=registrable,
-                    ts_first=now,
-                    ts_last=now,
-                )
-            )
-        s.commit()
-
-
-def list_tls_failures(kid: str | None = None) -> list[TlsFailure]:
-    with session() as s:
-        stmt = select(TlsFailure).order_by(TlsFailure.ts_last.desc())
-        if kid:
-            stmt = stmt.where(TlsFailure.kid == kid)
-        return list(s.exec(stmt).all())
-
-
-def delete_tls_failure(failure_id: int) -> bool:
-    with session() as s:
-        row = s.get(TlsFailure, failure_id)
-        if not row:
-            return False
-        s.delete(row)
-        s.commit()
-        return True
-
-
-def upsert_domain_stats(rows: list[dict]) -> None:
-    """Bulk UPSERT counter rows from the in-memory accumulator.
-
-    Each row must contain: kid, host, bucket_ts (datetime), requests, pages,
-    blocked, last_seen (datetime). Uses SQLite's ON CONFLICT to add deltas
-    onto an existing bucket. All rows go through in a single transaction so
-    a 30s batch of (kid, host) updates costs one fsync.
-    """
-    if not rows:
-        return
-    sql = text(
-        "INSERT INTO domain_stats "
-        "(kid, host, bucket_ts, requests, pages, blocked, last_seen) "
-        "VALUES (:kid, :host, :bucket_ts, :requests, :pages, :blocked, :last_seen) "
-        "ON CONFLICT(kid, host, bucket_ts) DO UPDATE SET "
-        "  requests = requests + excluded.requests, "
-        "  pages    = pages    + excluded.pages, "
-        "  blocked  = blocked  + excluded.blocked, "
-        "  last_seen = MAX(last_seen, excluded.last_seen)"
-    )
-    with session() as s:
-        s.connection().execute(sql, rows)
-        s.commit()
-
-
-def domain_stats_window(
-    since: datetime,
-    *,
-    kid: str | None = None,
-) -> list[DomainStat]:
-    """Return raw bucket rows newer than `since`, optionally scoped to one kid."""
-    with session() as s:
-        stmt = select(DomainStat).where(DomainStat.bucket_ts >= since)
-        if kid is not None:
-            stmt = stmt.where(DomainStat.kid == kid)
         return list(s.exec(stmt).all())
 
 
@@ -332,8 +372,8 @@ def stats() -> dict:
     p = _db_path()
     with session() as s:
         total = s.exec(select(func.count()).select_from(Event)).one()
-        oldest = s.exec(select(func.min(Event.ts))).one()
-        newest = s.exec(select(func.max(Event.ts))).one()
+        oldest = s.exec(select(func.min(Event.ts_last))).one()
+        newest = s.exec(select(func.max(Event.ts_last))).one()
     return {
         "events": int(total or 0),
         "oldest": oldest,
@@ -343,52 +383,33 @@ def stats() -> dict:
     }
 
 
-def prune(retention_days: int, max_events: int, stats_retention_days: int | None = None) -> dict:
-    """Delete events older than retention_days, then trim to max_events.
+def prune(retention_days: int, max_events: int, **_legacy_kwargs) -> dict:
+    """Delete events whose `ts_last` is older than `retention_days`, then
+    trim to `max_events` (oldest `ts_last` first).
 
-    Returns counts so the caller can log them. SQLite WAL serialises writes,
-    so this is safe to run alongside the insert path."""
-    from datetime import datetime, timedelta
+    Returns counts so the caller can log them. `**_legacy_kwargs` swallows
+    deprecated arguments (e.g. `stats_retention_days`) from older callers.
+    """
     from sqlmodel import delete, func
 
     cutoff = datetime.utcnow() - timedelta(days=retention_days)
     age_deleted = 0
     cap_deleted = 0
-    tls_deleted = 0
-    stats_deleted = 0
     with session() as s:
-        res = s.exec(delete(Event).where(Event.ts < cutoff))
+        res = s.exec(delete(Event).where(Event.ts_last < cutoff))
         age_deleted = res.rowcount or 0
         s.commit()
         total = s.exec(select(func.count()).select_from(Event)).one()
         if total and total > max_events:
             overflow = total - max_events
             ids_to_drop = list(s.exec(
-                select(Event.id).order_by(Event.id.asc()).limit(overflow)
+                select(Event.id).order_by(Event.ts_last.asc()).limit(overflow)
             ).all())
             if ids_to_drop:
                 s.exec(delete(Event).where(Event.id.in_(ids_to_drop)))
                 cap_deleted = len(ids_to_drop)
                 s.commit()
-        # Same age cutoff for tls_failures — if a host hasn't failed in
-        # `retention_days`, the parent has either fixed it via passthrough
-        # or the app is gone. No cap on this table; it's tiny by design.
-        res = s.exec(delete(TlsFailure).where(TlsFailure.ts_last < cutoff))
-        tls_deleted = res.rowcount or 0
-        s.commit()
-        # Counter buckets get their own retention knob; default to `retention_days`
-        # when not supplied so behaviour is unchanged for callers that don't pass it.
-        days = stats_retention_days if stats_retention_days is not None else retention_days
-        stats_cutoff = datetime.utcnow() - timedelta(days=days)
-        res = s.exec(delete(DomainStat).where(DomainStat.bucket_ts < stats_cutoff))
-        stats_deleted = res.rowcount or 0
-        s.commit()
-    return {
-        "age_deleted": age_deleted,
-        "cap_deleted": cap_deleted,
-        "tls_deleted": tls_deleted,
-        "stats_deleted": stats_deleted,
-    }
+    return {"age_deleted": age_deleted, "cap_deleted": cap_deleted}
 
 
 def vacuum() -> None:

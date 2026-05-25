@@ -28,6 +28,18 @@ log = logging.getLogger("gdlf.adguard")
 # by the sync loop; used by `host_blocked_service_for_kid()`.
 _service_hosts: dict[str, set[str]] = {}
 
+# Custom filtering rules we own + keep present in AdGuard's user_rules list.
+# Reconciled (additive) on every sync — never clobbers rules the parent
+# added manually. Marker comment lets us identify our rules on re-read.
+_OWNED_RULE_MARKER = "! gdlf:owned"
+GDLF_GLOBAL_RULES: tuple[tuple[str, str], ...] = (
+    # Firefox auto-disables its TRR (DoH) when this canary resolves to
+    # NXDOMAIN. See:
+    # https://support.mozilla.org/en-US/kb/configuring-networks-disable-dns-over-https
+    ("||use-application-dns.net^$dnstype=A,important",
+     "Firefox DoH canary — keep DoH disabled on managed network"),
+)
+
 # AdGuard rule formats we care about for service catalog blocking. Anything
 # more exotic (regex rules, modifier rules) is ignored — the catalog uses
 # `||domain^` for the vast majority of entries and that's all we need.
@@ -119,6 +131,44 @@ async def sync_once() -> None:
         # Drop clients we manage but no longer want.
         for name in existing_names - set(desired):
             await _delete_client(client, name)
+
+        try:
+            await _ensure_global_rules(client)
+        except Exception as e:
+            log.debug("global rule reconcile failed: %s", e)
+
+
+async def _ensure_global_rules(client: httpx.AsyncClient) -> None:
+    """Additively reconcile our owned rules into AdGuard's user_rules list.
+
+    AdGuard's `/control/filtering/set_rules` replaces the whole list, so
+    we GET it first, merge our entries (skipping any already present), and
+    POST back. Parent-added rules survive untouched. Each owned rule is
+    paired with a marker comment so future versions can identify its line.
+    """
+    r = await client.get(
+        f"{settings.adguard_url}/control/filtering/status", auth=_auth()
+    )
+    r.raise_for_status()
+    status = r.json() or {}
+    current = [str(x) for x in (status.get("user_rules") or [])]
+    present = set(current)
+    added: list[str] = []
+    for rule, note in GDLF_GLOBAL_RULES:
+        if rule in present:
+            continue
+        added.append(f"{_OWNED_RULE_MARKER}: {note}")
+        added.append(rule)
+    if not added:
+        return
+    merged = current + added
+    r = await client.post(
+        f"{settings.adguard_url}/control/filtering/set_rules",
+        json={"rules": merged},
+        auth=_auth(),
+    )
+    if r.status_code >= 400:
+        log.warning("adguard set_rules -> %s %s", r.status_code, r.text)
 
 
 async def fetch_blocked_services_catalog() -> dict:

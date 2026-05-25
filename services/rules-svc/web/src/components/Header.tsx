@@ -15,7 +15,7 @@ import { ThemeToggle } from "./ThemeToggle";
 import { useLogout } from "../lib/mutations";
 
 const NAV: { to: string; label: string; match: string }[] = [
-  { to: "/kids", label: "Kids", match: "/kids" },
+  { to: "/kids", label: "Home", match: "/kids" },
   { to: "/activity", label: "Activity", match: "/activity" },
   { to: "/settings", label: "Settings", match: "/settings" },
 ];
@@ -45,7 +45,7 @@ export function Header() {
 
       <NavbarBrand>
         <Link to="/kids" className="flex items-center gap-2 font-semibold">
-          <img src="/logo-256.png" alt="" className="h-7 w-7 rounded" />
+          <img src="/logo-256.png" alt="" className="h-10 w-10 -my-2" />
           <span className="text-base">gdlf</span>
         </Link>
       </NavbarBrand>

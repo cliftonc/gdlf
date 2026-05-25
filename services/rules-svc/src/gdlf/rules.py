@@ -1,14 +1,18 @@
 """URL-rule evaluation. Shared by the dashboard ('test this rule') and
 the mitmproxy addon (the actual enforcement point).
 
-A rule's `match` is a host+path pattern:
-    "youtube.com/shorts/*"        -> host=youtube.com, path starts with /shorts/
-    "*.reddit.com/r/teenagers/*"  -> *.reddit.com matches subdomains
-    "*/search"                    -> any host, path == /search
-The match string is split on the FIRST slash. Host portion uses fnmatch;
-path portion is a glob anchored at the start (trailing /* matches anything).
+Rules have separate `host` and `path` fields. Path + query are MITM-only
+filters: without decryption we can't see them, so for a non-MITM host the
+rule degrades to a domain-only match. `host_matches_inspect()` is the
+predicate the addon uses to decide if a SNI is effectively MITM'd.
 
-`query` is an optional regex (re.search) applied to the raw query string.
+Examples:
+    host="youtube.com", path="/shorts/*"
+        kid has youtube.com in MITM → blocks only /shorts/*
+        kid does NOT have it in MITM → matches the host alone (whole site)
+
+    host="*.reddit.com" (no path)
+        Always a domain-only match.
 """
 from __future__ import annotations
 
@@ -21,21 +25,16 @@ from .schema import Kid, URLRule
 
 @dataclass
 class Decision:
-    action: str  # 'allow' | 'block' | 'flag' | 'allow'  (default)
+    action: str  # 'allow' | 'block' | 'flag'
     rule: URLRule | None
     flag: bool
 
 
-def _split_match(s: str) -> tuple[str, str]:
-    if "/" in s:
-        host, path = s.split("/", 1)
-        return host, "/" + path
-    return s, "/*"
-
-
 def _host_matches(pattern: str, host: str) -> bool:
-    host = host.lower()
-    pattern = pattern.lower()
+    host = (host or "").lower()
+    pattern = (pattern or "").lower()
+    if not pattern:
+        return False
     if pattern == host:
         return True
     if fnmatch.fnmatchcase(host, pattern):
@@ -46,52 +45,75 @@ def _host_matches(pattern: str, host: str) -> bool:
     return False
 
 
-def _path_matches(pattern: str, path: str) -> bool:
-    return fnmatch.fnmatchcase(path, pattern)
+def _path_matches(pattern: str | None, path: str) -> bool:
+    if not pattern:
+        return True  # no path on the rule = host-only match
+    p = pattern if pattern.startswith("/") else "/" + pattern
+    return fnmatch.fnmatchcase(path or "/", p)
 
 
-def match_rule(rule: URLRule, host: str, path: str, query: str | None) -> bool:
-    hp, pp = _split_match(rule.match)
-    if not _host_matches(hp, host):
+def host_in_inspect(kid: Kid, host: str) -> bool:
+    """True if `host` matches any of the kid's MITM globs. Used both by the
+    evaluator (to decide whether path/query filters apply) and by the
+    addon's SNI-time decision logic."""
+    for pat in kid.mitm_inspect_hosts:
+        if _host_matches(pat, host):
+            return True
+    return False
+
+
+def match_rule(
+    rule: URLRule,
+    host: str,
+    path: str,
+    query: str | None,
+    *,
+    host_is_mitm: bool,
+) -> bool:
+    if not _host_matches(rule.host, host):
         return False
-    if not _path_matches(pp, path):
-        return False
-    if rule.query:
-        # Treat a malformed regex as non-matching so a typo in kids.yaml
-        # doesn't crash the decision API (which would then fail open).
-        # Rule creation also validates up-front; this is defense in depth.
-        try:
-            if not re.search(rule.query, query or ""):
-                return False
-        except re.error:
-            import logging
-            logging.getLogger("gdlf.rules").warning(
-                "rule has invalid query regex %r — skipping", rule.query
-            )
+    # Path + query are MITM-only filters. Without decryption we have no
+    # path to compare against; a rule that specified one degrades to a
+    # host-only match — coarser than the parent typed but at least the
+    # rule still bites.
+    if host_is_mitm:
+        if rule.path and not _path_matches(rule.path, path):
             return False
+        if rule.query:
+            try:
+                if not re.search(rule.query, query or ""):
+                    return False
+            except re.error:
+                import logging
+                logging.getLogger("gdlf.rules").warning(
+                    "rule has invalid query regex %r — skipping", rule.query
+                )
+                return False
     return True
 
 
-def suggest_match(host: str, path: str) -> str:
-    """Build a sensible match pattern from an observed host+path.
+def suggest_match(host: str, path: str) -> dict[str, str | None]:
+    """Build sensible host + path globs from an observed host + path.
+
+    Returns {"host": ..., "path": ...|None}.
 
     Examples:
-      youtube.com  /shorts/abc       -> youtube.com/shorts/*
-      google.com   /search           -> google.com/search
-      reddit.com   /r/teens/comments -> reddit.com/r/teens/*
-      example.com  /                 -> example.com
+      youtube.com  /shorts/abc       -> host=youtube.com path=/shorts/*
+      google.com   /search           -> host=google.com  path=/search
+      reddit.com   /r/teens/comments -> host=reddit.com  path=/r/teens/*
+      example.com  /                 -> host=example.com path=None
     """
     host = (host or "").strip().lower()
-    path = (path or "").strip() or "/"
-    if path in ("", "/"):
-        return host
+    path = (path or "").strip()
+    if not path or path == "/":
+        return {"host": host, "path": None}
     segs = [s for s in path.split("/") if s]
     if not segs:
-        return host
+        return {"host": host, "path": None}
     if len(segs) == 1:
-        return f"{host}/{segs[0]}"
+        return {"host": host, "path": f"/{segs[0]}"}
     take = segs[:2] if len(segs) > 2 else segs[:1]
-    return f"{host}/{'/'.join(take)}/*"
+    return {"host": host, "path": f"/{'/'.join(take)}/*"}
 
 
 def evaluate(kid: Kid, host: str, path: str = "/", query: str | None = None) -> Decision:
@@ -100,15 +122,31 @@ def evaluate(kid: Kid, host: str, path: str = "/", query: str | None = None) -> 
     Returns Decision(action='allow') by default if nothing matches. The
     `flag` attribute is true if a matched rule had flag=true *or* if the
     rule's action itself is 'flag'.
+
+    The MITM-status of `host` is derived from `kid.mitm_inspect_hosts`. For
+    non-MITM hosts the evaluator silently drops any path/query predicates,
+    so the rule degrades to a host-only match.
     """
+    host_is_mitm = host_in_inspect(kid, host)
     for rule in kid.url_rules:
-        if match_rule(rule, host, path, query):
+        if match_rule(rule, host, path, query, host_is_mitm=host_is_mitm):
             return Decision(
                 action=rule.action,
                 rule=rule,
                 flag=rule.flag or rule.action == "flag",
             )
     return Decision(action="allow", rule=None, flag=False)
+
+
+def hosts_with_block_or_flag_rules(kid: Kid) -> list[str]:
+    """Return the host globs of every block/flag rule on this kid.
+
+    The addon unions this with `mitm_inspect_hosts` so domain-only block
+    rules still bite even when the parent hasn't explicitly added the host
+    to MITM. Without this, /api/decision would never be called for the
+    domain and the rule would silently never fire.
+    """
+    return [r.host for r in kid.url_rules if r.action in ("block", "flag") or r.flag]
 
 
 # Pretty block-page returned to the device on a hit.

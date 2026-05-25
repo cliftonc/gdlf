@@ -56,7 +56,8 @@ function RuleNewPage() {
               sr.query
                 ? {
                     action: "block",
-                    match: "",
+                    host: "",
+                    path: null,
                     query: sr.query,
                     flag: false,
                     note: null,
@@ -72,7 +73,8 @@ function RuleNewPage() {
               try {
                 await add.mutateAsync({
                   action: values.action,
-                  match: values.match,
+                  host: values.host,
+                  path: values.path || null,
                   query: values.query || null,
                   flag: values.flag,
                   note: values.note || null,

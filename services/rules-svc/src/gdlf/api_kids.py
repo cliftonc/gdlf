@@ -50,6 +50,14 @@ class BlockedAppsBody(BaseModel):
     blocked_apps: list[str]
 
 
+class InspectBody(BaseModel):
+    hosts: list[str]
+
+
+class InspectAddBody(BaseModel):
+    host: str
+
+
 @router.get("")
 def list_kids() -> dict:
     cfg = store.load()
@@ -250,6 +258,53 @@ def remove_passthrough(name: str, host: str) -> dict:
     store.mutate(upd)
     cfg = store.load(force=True)
     return {"mitm_passthrough_hosts": list(cfg.kid(name).mitm_passthrough_hosts)}
+
+
+@router.put("/{name}/inspect")
+def set_inspect(name: str, body: InspectBody) -> dict:
+    cleaned = sorted({h.strip().lower() for h in body.hosts if h and h.strip()})
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.mitm_inspect_hosts = cleaned
+
+    store.mutate(upd)
+    return {"mitm_inspect_hosts": cleaned}
+
+
+@router.post("/{name}/inspect")
+def add_inspect(name: str, body: InspectAddBody) -> dict:
+    host = body.host.strip().lower()
+    if not host:
+        raise HTTPException(400, "host required")
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        if host not in kid.mitm_inspect_hosts:
+            kid.mitm_inspect_hosts = sorted([*kid.mitm_inspect_hosts, host])
+
+    store.mutate(upd)
+    cfg = store.load(force=True)
+    return {"mitm_inspect_hosts": list(cfg.kid(name).mitm_inspect_hosts)}
+
+
+@router.delete("/{name}/inspect/{host}")
+def remove_inspect(name: str, host: str) -> dict:
+    target = host.strip().lower()
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        kid.mitm_inspect_hosts = [h for h in kid.mitm_inspect_hosts if h != target]
+
+    store.mutate(upd)
+    cfg = store.load(force=True)
+    return {"mitm_inspect_hosts": list(cfg.kid(name).mitm_inspect_hosts)}
 
 
 @router.put("/{name}/blocked-apps")

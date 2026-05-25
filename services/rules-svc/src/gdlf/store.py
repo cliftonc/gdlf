@@ -88,15 +88,32 @@ def load(force: bool = False) -> KidsConfig:
 
 
 def _drop_deprecated_keys(raw: dict) -> None:
-    """One-shot migration: strip legacy top-level `blocklists` / `apps`
-    (formerly the Rules Library) and per-kid `blocklists`. Schema uses
-    `extra=forbid`, so these would otherwise hard-fail an upgrade. The keys
-    are removed in-place; next save() drops them from the file."""
+    """One-shot migrations applied at load time. Schema uses `extra=forbid`,
+    so these would otherwise hard-fail an upgrade. Mutations are in-place;
+    next save() rewrites the YAML in the new shape.
+
+    Currently:
+      * drop legacy top-level `blocklists` / `apps` (former Rules Library)
+        and per-kid `blocklists`
+      * split legacy `url_rules[].match` (combined host+path glob) into
+        separate `host` / `path` fields, splitting on the first `/`
+    """
     raw.pop("blocklists", None)
     raw.pop("apps", None)
     for k in raw.get("kids") or []:
-        if isinstance(k, dict):
-            k.pop("blocklists", None)
+        if not isinstance(k, dict):
+            continue
+        k.pop("blocklists", None)
+        for r in k.get("url_rules") or []:
+            if not isinstance(r, dict) or "match" not in r:
+                continue
+            m = (r.pop("match") or "").strip()
+            if "/" in m:
+                host, rest = m.split("/", 1)
+                r.setdefault("host", host)
+                r.setdefault("path", "/" + rest)
+            else:
+                r.setdefault("host", m)
 
 
 def save(cfg: KidsConfig) -> None:

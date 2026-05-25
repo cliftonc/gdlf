@@ -35,6 +35,7 @@ empty.
 table inet gdlf {
   set blocked_clients { ip addrs whose schedule says "out of allowed hours" right now }
   set mitm_clients    { ip addrs whose mitm_ca_installed == true }
+  set doh_dot_ips     { well-known DoH/DoT resolver IPs — DOH_DOT_IPS in reconcile.py }
 
   chain prerouting {  # NAT prerouting (DNAT)
     iifname wg0 udp/tcp dport 53                       → 127.0.0.1     (AdGuard listening in this NS)
@@ -50,6 +51,8 @@ table inet gdlf {
     iifname wg0 @blocked_clients meta l4proto udp    drop                     # UDP (QUIC, etc.)
     iifname wg0 @mitm_clients   udp dport 443        reject                   # force QUIC → TCP for inspection
     iifname wg0 ip daddr 10.13.13.254 tcp dport 443  reject with tcp reset    # sinkhole HTTPS fast-fail
+    iifname wg0 ip daddr @doh_dot_ips tcp dport {443,853} reject with tcp reset   # block DoH/DoT, force fallback to system DNS
+    iifname wg0 ip daddr @doh_dot_ips udp dport {443,853} drop                    # same, UDP variants
   }
 
   chain postrouting {  # NAT srcnat

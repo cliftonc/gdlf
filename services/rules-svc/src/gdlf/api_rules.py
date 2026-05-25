@@ -16,7 +16,8 @@ router = APIRouter(tags=["rules"])
 
 class CreateRuleBody(BaseModel):
     action: RuleAction
-    match: str
+    host: str
+    path: str | None = None
     query: str | None = None
     flag: bool = False
     note: str | None = None
@@ -34,21 +35,32 @@ def add_rule(name: str, body: CreateRuleBody) -> dict:
         kid = cfg.kid(name)
         if not kid:
             raise HTTPException(404, "unknown kid")
-        kid.url_rules.append(
-            URLRule(
-                action=body.action,
-                match=body.match.strip(),
-                query=(body.query.strip() if body.query else None) or None,
-                flag=body.flag,
-                note=(body.note.strip() if body.note else None) or None,
-            )
-        )
+        kid.url_rules.append(_build_rule(body))
 
     store.mutate(add)
     cfg = store.load(force=True)
     kid = cfg.kid(name)
     new_idx = len(kid.url_rules) - 1
     return {"rule": rule_dto(kid.url_rules[new_idx]), "index": new_idx}
+
+
+def _build_rule(body: CreateRuleBody) -> URLRule:
+    host = (body.host or "").strip().lower()
+    if not host:
+        raise HTTPException(400, "host is required")
+    raw_path = (body.path or "").strip() or None
+    # Normalise path so an off-by-one slash from the UI doesn't silently
+    # break matching (rule.path is matched with fnmatch anchored at /).
+    if raw_path and not raw_path.startswith("/"):
+        raw_path = "/" + raw_path
+    return URLRule(
+        action=body.action,
+        host=host,
+        path=raw_path,
+        query=(body.query.strip() if body.query else None) or None,
+        flag=body.flag,
+        note=(body.note.strip() if body.note else None) or None,
+    )
 
 
 def _validate_query_regex(query: str | None) -> None:
@@ -73,13 +85,7 @@ def update_rule(name: str, idx: int, body: CreateRuleBody) -> dict:
             raise HTTPException(404, "unknown kid")
         if not (0 <= idx < len(kid.url_rules)):
             raise HTTPException(404, "rule out of range")
-        kid.url_rules[idx] = URLRule(
-            action=body.action,
-            match=body.match.strip(),
-            query=(body.query.strip() if body.query else None) or None,
-            flag=body.flag,
-            note=(body.note.strip() if body.note else None) or None,
-        )
+        kid.url_rules[idx] = _build_rule(body)
 
     store.mutate(upd)
     cfg = store.load(force=True)
@@ -124,4 +130,6 @@ def move_rule(name: str, idx: int, body: MoveBody) -> dict:
 
 @router.get("/api/rules/suggest")
 def suggest(host: str = "", path: str = "") -> dict:
+    """Return suggested {host, path} globs for a host+path observation.
+    UI prefills the rule editor from these."""
     return {"suggested": rules_mod.suggest_match(host, path)}

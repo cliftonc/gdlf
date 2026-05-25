@@ -234,3 +234,9 @@ BULK_CDN_GROUPS: dict[str, tuple[str, ...]] = {
 BULK_CDN_PATTERNS: tuple[str, ...] = tuple(
     p for patterns in BULK_CDN_GROUPS.values() for p in patterns
 )
+
+
+# No global inspect defaults: splice-by-default for ALL traffic until the
+# parent explicitly opts in a domain via `Kid.mitm_inspect_hosts`. This is
+# the cleanest expression of the inversion — zero magic, every MITM target
+# is a deliberate per-kid choice.

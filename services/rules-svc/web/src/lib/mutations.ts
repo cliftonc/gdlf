@@ -84,11 +84,11 @@ export function useKidBlock(name: string) {
   });
 }
 
-export function useAddPassthrough(name: string) {
+export function useAddInspect(name: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (host: string) =>
-      api(`/api/kids/${encodeURIComponent(name)}/passthrough`, {
+      api(`/api/kids/${encodeURIComponent(name)}/inspect`, {
         method: "POST",
         body: { host },
       }),
@@ -96,14 +96,29 @@ export function useAddPassthrough(name: string) {
   });
 }
 
-export function useRemovePassthrough(name: string) {
+export function useRemoveInspect(name: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (host: string) =>
       api(
-        `/api/kids/${encodeURIComponent(name)}/passthrough/${encodeURIComponent(host)}`,
+        `/api/kids/${encodeURIComponent(name)}/inspect/${encodeURIComponent(host)}`,
         { method: "DELETE" }
       ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.kid(name) });
+      qc.invalidateQueries({ queryKey: ["tls-failures"], exact: false });
+    },
+  });
+}
+
+export function useSetInspect(name: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (hosts: string[]) =>
+      api(`/api/kids/${encodeURIComponent(name)}/inspect`, {
+        method: "PUT",
+        body: { hosts },
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
   });
 }
@@ -117,37 +132,6 @@ export function useSetBlockedApps(name: string) {
         body: { blocked_apps },
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
-  });
-}
-
-export function useSetPassthrough(name: string) {
-  // Atomic replace — used for raw-list edits (e.g. custom-rules teardown).
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (hosts: string[]) =>
-      api(`/api/kids/${encodeURIComponent(name)}/passthrough`, {
-        method: "PUT",
-        body: { hosts },
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
-  });
-}
-
-export function useTogglePassthroughGroup(name: string) {
-  // Flip one registrable on/off. Server adds/removes the apex + wildcard
-  // patterns AND updates the opt-out list (so a disabled domain stays
-  // disabled even if the device keeps retrying).
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (vars: { registrable: string; enabled: boolean }) =>
-      api(`/api/kids/${encodeURIComponent(name)}/passthrough-group`, {
-        method: "PUT",
-        body: vars,
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.kid(name) });
-      qc.invalidateQueries({ queryKey: ["tls-failures"], exact: false });
-    },
   });
 }
 
@@ -228,22 +212,19 @@ export function useMarkMitmInstalled(kidName: string, ip: string, dlCode?: strin
   });
 }
 
+export type RuleBody = {
+  action: RuleAction;
+  host: string;
+  path: string | null;
+  query: string | null;
+  flag: boolean;
+  note: string | null;
+};
+
 export function useUpdateRule(name: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      idx,
-      body,
-    }: {
-      idx: number;
-      body: {
-        action: RuleAction;
-        match: string;
-        query: string | null;
-        flag: boolean;
-        note: string | null;
-      };
-    }) =>
+    mutationFn: ({ idx, body }: { idx: number; body: RuleBody }) =>
       api(`/api/kids/${encodeURIComponent(name)}/rules/${idx}`, {
         method: "PUT",
         body,
@@ -255,13 +236,7 @@ export function useUpdateRule(name: string) {
 export function useAddRule(name: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: {
-      action: RuleAction;
-      match: string;
-      query: string | null;
-      flag: boolean;
-      note: string | null;
-    }) =>
+    mutationFn: (body: RuleBody) =>
       api(`/api/kids/${encodeURIComponent(name)}/rules`, {
         method: "POST",
         body,
