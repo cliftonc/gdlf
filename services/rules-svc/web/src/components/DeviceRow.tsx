@@ -5,6 +5,7 @@ import type { Device, MdmStatus } from "../lib/schemas";
 import { useConfirm } from "../lib/hooks/useConfirm";
 import { useDeleteDevice, useDeviceBlock, useRegenerateDevice } from "../lib/mutations";
 import { MdmDialog } from "./MdmDialog";
+import { PlatformIcon, platformLabel } from "./PlatformIcon";
 
 function mdmChipColor(status: MdmStatus): "success" | "warning" | "danger" {
   if (status === "enrolled") return "success";
@@ -16,6 +17,12 @@ function androidMdmChipColor(status: string): "success" | "warning" | "danger" {
   if (status === "active") return "success";
   if (status === "pending") return "warning";
   return "danger"; // disabled / deleted
+}
+
+function windowsMdmChipColor(status: string): "success" | "warning" | "danger" {
+  if (status === "enrolled") return "success";
+  if (status === "pending") return "warning";
+  return "danger"; // revoked
 }
 
 function formatAgo(ts: number): string {
@@ -77,10 +84,14 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
     <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-4 border border-default-200 rounded-medium bg-content1">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
+          <PlatformIcon
+            platform={device.platform}
+            className="text-lg text-default-500"
+          />
           <p className="font-medium truncate">{device.name}</p>
-          <Chip size="sm" variant="flat">
-            {device.platform}
-          </Chip>
+          <span className="text-xs text-default-500">
+            {platformLabel(device.platform)}
+          </span>
           {device.online ? (
             <Chip size="sm" color="success" variant="flat">
               Online
@@ -112,6 +123,15 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
               variant="flat"
             >
               MDM: {device.android_mdm.status}
+            </Chip>
+          )}
+          {device.windows_mdm && (
+            <Chip
+              size="sm"
+              color={windowsMdmChipColor(device.windows_mdm.status)}
+              variant="flat"
+            >
+              MDM: {device.windows_mdm.status}
             </Chip>
           )}
         </div>
@@ -152,6 +172,16 @@ export function DeviceRow({ kidName, device }: { kidName: string; device: Device
             size="sm"
             variant="flat"
             color={device.android_mdm?.status === "active" ? "success" : "default"}
+            onPress={() => setMdmOpen(true)}
+          >
+            MDM
+          </Button>
+        )}
+        {device.platform === "windows" && (
+          <Button
+            size="sm"
+            variant="flat"
+            color={device.windows_mdm?.status === "enrolled" ? "success" : "default"}
             onPress={() => setMdmOpen(true)}
           >
             MDM

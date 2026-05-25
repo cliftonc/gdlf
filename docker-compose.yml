@@ -34,9 +34,10 @@ services:
       - /lib/modules:/lib/modules:ro
     ports:
       - "${WG_PORT}:51820/udp"
-      # AdGuard runs inside this netns — expose its web UI + setup wizard here.
-      - "127.0.0.1:3000:3000/tcp"
-      - "127.0.0.1:8082:80/tcp"
+      # AdGuard runs inside this netns — expose its admin UI on the host.
+      # The setup wizard (:3000) is intentionally not bound; `./gdlf init`
+      # seeds AdGuardHome.yaml with an admin user so the wizard is skipped.
+      - "${ADGUARD_UI_PORT:-8082}:80/tcp"
     networks:
       gdlf:
         ipv4_address: 10.42.0.2
@@ -97,6 +98,20 @@ services:
       - block_global=false
       - --set
       - confdir=/home/mitmproxy/.mitmproxy
+      # Stream response bodies larger than 512k instead of buffering them in
+      # memory. Big downloads (Steam content, Windows Update fallbacks) used
+      # to pin a full multi-MB body in RAM per flow before the addon ran;
+      # streaming drops both memory and CPU during bulk transfers.
+      - --set
+      - stream_large_bodies=512k
+      # Silence per-flow request/response chatter on stdout — we already
+      # sink every request to SQLite via /api/events. Warnings + errors
+      # still print so real problems (cert issues, addon crashes) stay
+      # visible in `docker logs gdlf-mitm`.
+      - --set
+      - flow_detail=0
+      - --set
+      - termlog_verbosity=warn
       - -s
       - /addons/mitm_capture.py
     volumes:
@@ -161,6 +176,7 @@ services:
       # inside wg's netns is published on the host as 8082 too).
       ADGUARD_URL: http://10.42.0.2:80
       ADGUARD_ADMIN_PASSWORD: ${ADGUARD_ADMIN_PASSWORD}
+      ADGUARD_UI_PORT: ${ADGUARD_UI_PORT:-8082}
       ADMIN_PASSWORD: ${RULES_SVC_ADMIN_PASSWORD}
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
       SMTP_HOST: ${SMTP_HOST}

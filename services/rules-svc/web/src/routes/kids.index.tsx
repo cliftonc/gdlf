@@ -10,7 +10,7 @@ import {
   ModalHeader,
   Spinner,
 } from "@heroui/react";
-import { useKids } from "../lib/queries";
+import { useKids, useStatsOverview } from "../lib/queries";
 import { useCreateKid } from "../lib/mutations";
 import { KidCard } from "../components/KidCard";
 import { EmptyState } from "../components/EmptyState";
@@ -21,7 +21,11 @@ export const Route = createFileRoute("/kids/")({
 
 function KidsIndex() {
   const kids = useKids();
+  const stats = useStatsOverview();
   const [open, setOpen] = useState(false);
+  const statsByKid = new Map(
+    (stats.data ?? []).map((s) => [s.kid, s] as const),
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -57,7 +61,7 @@ function KidsIndex() {
       {kids.data && kids.data.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
           {kids.data.map((k) => (
-            <KidCard key={k.name} kid={k} />
+            <KidCard key={k.name} kid={k} stats={statsByKid.get(k.name)} />
           ))}
         </div>
       )}

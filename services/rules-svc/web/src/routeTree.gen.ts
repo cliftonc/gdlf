@@ -14,6 +14,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as ActivityRouteImport } from './routes/activity'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as KidsIndexRouteImport } from './routes/kids.index'
+import { Route as DlCodeRouteImport } from './routes/dl.$code'
 import { Route as KidsNameIndexRouteImport } from './routes/kids.$name.index'
 import { Route as KidsNameRulesNewRouteImport } from './routes/kids.$name.rules.new'
 import { Route as KidsNameDevicesNewRouteImport } from './routes/kids.$name.devices.new'
@@ -43,6 +44,11 @@ const IndexRoute = IndexRouteImport.update({
 const KidsIndexRoute = KidsIndexRouteImport.update({
   id: '/kids/',
   path: '/kids/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DlCodeRoute = DlCodeRouteImport.update({
+  id: '/dl/$code',
+  path: '/dl/$code',
   getParentRoute: () => rootRouteImport,
 } as any)
 const KidsNameIndexRoute = KidsNameIndexRouteImport.update({
@@ -76,6 +82,7 @@ export interface FileRoutesByFullPath {
   '/activity': typeof ActivityRoute
   '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
+  '/dl/$code': typeof DlCodeRoute
   '/kids/': typeof KidsIndexRoute
   '/kids/$name/': typeof KidsNameIndexRoute
   '/kids/$name/devices/new': typeof KidsNameDevicesNewRoute
@@ -88,6 +95,7 @@ export interface FileRoutesByTo {
   '/activity': typeof ActivityRoute
   '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
+  '/dl/$code': typeof DlCodeRoute
   '/kids': typeof KidsIndexRoute
   '/kids/$name': typeof KidsNameIndexRoute
   '/kids/$name/devices/new': typeof KidsNameDevicesNewRoute
@@ -101,6 +109,7 @@ export interface FileRoutesById {
   '/activity': typeof ActivityRoute
   '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
+  '/dl/$code': typeof DlCodeRoute
   '/kids/': typeof KidsIndexRoute
   '/kids/$name/': typeof KidsNameIndexRoute
   '/kids/$name/devices/new': typeof KidsNameDevicesNewRoute
@@ -115,6 +124,7 @@ export interface FileRouteTypes {
     | '/activity'
     | '/login'
     | '/settings'
+    | '/dl/$code'
     | '/kids/'
     | '/kids/$name/'
     | '/kids/$name/devices/new'
@@ -127,6 +137,7 @@ export interface FileRouteTypes {
     | '/activity'
     | '/login'
     | '/settings'
+    | '/dl/$code'
     | '/kids'
     | '/kids/$name'
     | '/kids/$name/devices/new'
@@ -139,6 +150,7 @@ export interface FileRouteTypes {
     | '/activity'
     | '/login'
     | '/settings'
+    | '/dl/$code'
     | '/kids/'
     | '/kids/$name/'
     | '/kids/$name/devices/new'
@@ -152,6 +164,7 @@ export interface RootRouteChildren {
   ActivityRoute: typeof ActivityRoute
   LoginRoute: typeof LoginRoute
   SettingsRoute: typeof SettingsRoute
+  DlCodeRoute: typeof DlCodeRoute
   KidsIndexRoute: typeof KidsIndexRoute
   KidsNameIndexRoute: typeof KidsNameIndexRoute
   KidsNameDevicesNewRoute: typeof KidsNameDevicesNewRoute
@@ -197,6 +210,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof KidsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/dl/$code': {
+      id: '/dl/$code'
+      path: '/dl/$code'
+      fullPath: '/dl/$code'
+      preLoaderRoute: typeof DlCodeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/kids/$name/': {
       id: '/kids/$name/'
       path: '/kids/$name'
@@ -240,6 +260,7 @@ const rootRouteChildren: RootRouteChildren = {
   ActivityRoute: ActivityRoute,
   LoginRoute: LoginRoute,
   SettingsRoute: SettingsRoute,
+  DlCodeRoute: DlCodeRoute,
   KidsIndexRoute: KidsIndexRoute,
   KidsNameIndexRoute: KidsNameIndexRoute,
   KidsNameDevicesNewRoute: KidsNameDevicesNewRoute,

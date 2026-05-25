@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "./api";
+import { api, withDl } from "./api";
 import { qk } from "./queries";
-import type { Platform, RuleAction } from "./schemas";
+import { ShortlinkSchema, type Platform, type RuleAction, type Shortlink } from "./schemas";
 
 export function useLogin() {
   return useMutation({
@@ -121,8 +121,7 @@ export function useSetBlockedApps(name: string) {
 }
 
 export function useSetPassthrough(name: string) {
-  // Atomic replace — used by the group-switch UI so toggling on/off applies
-  // both the apex and `*.<reg>` patterns (or removes them) in one shot.
+  // Atomic replace — used for raw-list edits (e.g. custom-rules teardown).
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (hosts: string[]) =>
@@ -131,6 +130,24 @@ export function useSetPassthrough(name: string) {
         body: { hosts },
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(name) }),
+  });
+}
+
+export function useTogglePassthroughGroup(name: string) {
+  // Flip one registrable on/off. Server adds/removes the apex + wildcard
+  // patterns AND updates the opt-out list (so a disabled domain stays
+  // disabled even if the device keeps retrying).
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { registrable: string; enabled: boolean }) =>
+      api(`/api/kids/${encodeURIComponent(name)}/passthrough-group`, {
+        method: "PUT",
+        body: vars,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.kid(name) });
+      qc.invalidateQueries({ queryKey: ["tls-failures"], exact: false });
+    },
   });
 }
 
@@ -196,17 +213,17 @@ export function useRegenerateDevice(kidName: string) {
   });
 }
 
-export function useMarkMitmInstalled(kidName: string, ip: string) {
+export function useMarkMitmInstalled(kidName: string, ip: string, dlCode?: string | null) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (installed: boolean) =>
-      api(`/api/devices/${encodeURIComponent(ip)}/mitm-installed`, {
+      api(withDl(`/api/devices/${encodeURIComponent(ip)}/mitm-installed`, dlCode), {
         method: "PUT",
         body: { installed },
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.enrolment(kidName, ip) });
-      qc.invalidateQueries({ queryKey: qk.kid(kidName) });
+      if (!dlCode) qc.invalidateQueries({ queryKey: qk.kid(kidName) });
     },
   });
 }
@@ -276,14 +293,14 @@ export function useMoveRule(name: string) {
 
 // --- MDM mutations ---------------------------------------------------------
 
-export function useMdmEnrollToken(kidName: string) {
+export function useMdmEnrollToken(kidName: string, dlCode?: string | null) {
   // Returns a fresh one-time enrolment URL for the device. We deliberately
   // don't invalidate the kid query here — the dashboard renders the URL
   // from the mutation result directly (it includes the random token).
   return useMutation({
     mutationFn: (ip: string) =>
       api<{ token: string; enroll_url: string; expires_at: string }>(
-        `/api/devices/${encodeURIComponent(ip)}/mdm/enroll-token`,
+        withDl(`/api/devices/${encodeURIComponent(ip)}/mdm/enroll-token`, dlCode),
         { method: "POST" }
       ),
     onSuccess: (_data, _ip) => {
@@ -334,15 +351,17 @@ export function useMdmEnqueueCommand(kidName: string) {
 
 // --- Android MDM (AMAPI) mutations ----------------------------------------
 
-export function useAndroidMdmEnrollToken(kidName: string) {
+export function useAndroidMdmEnrollToken(kidName: string, dlCode?: string | null) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (ip: string) =>
       api<{ token_name: string; qr_url: string; expires_at: string | null }>(
-        `/api/devices/${encodeURIComponent(ip)}/android-mdm/enroll-token`,
+        withDl(`/api/devices/${encodeURIComponent(ip)}/android-mdm/enroll-token`, dlCode),
         { method: "POST" }
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(kidName) }),
+    onSuccess: () => {
+      if (!dlCode) qc.invalidateQueries({ queryKey: qk.kid(kidName) });
+    },
   });
 }
 
@@ -374,6 +393,77 @@ export function useAndroidMdmUnenroll(kidName: string) {
     mutationFn: (ip: string) =>
       api(`/api/devices/${encodeURIComponent(ip)}/android-mdm`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(kidName) }),
+  });
+}
+
+// --- Windows MDM (.ppkg) mutations ----------------------------------------
+
+export interface WindowsPackageResponse {
+  download_url: string;
+  package_id: string;
+  package_version: string;
+  signed: boolean;
+  expires_at: string;
+}
+
+export function useWindowsMdmEnrollPackage(kidName: string, dlCode?: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api<WindowsPackageResponse>(
+        withDl(`/api/devices/${encodeURIComponent(ip)}/windows-mdm/enroll-package`, dlCode),
+        { method: "POST" }
+      ),
+    onSuccess: (_data, ip) => {
+      if (!dlCode) qc.invalidateQueries({ queryKey: qk.kid(kidName) });
+      qc.invalidateQueries({ queryKey: qk.enrolment(kidName, ip) });
+    },
+  });
+}
+
+export function useWindowsMdmMarkEnrolled(kidName: string, dlCode?: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api<{ ok: boolean; status: string }>(
+        withDl(`/api/devices/${encodeURIComponent(ip)}/windows-mdm/mark-enrolled`, dlCode),
+        { method: "POST" }
+      ),
+    onSuccess: (_data, ip) => {
+      if (!dlCode) qc.invalidateQueries({ queryKey: qk.kid(kidName) });
+      qc.invalidateQueries({ queryKey: qk.enrolment(kidName, ip) });
+    },
+  });
+}
+
+export function useWindowsMdmRevoke(kidName: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ip: string) =>
+      api<WindowsPackageResponse>(
+        `/api/devices/${encodeURIComponent(ip)}/windows-mdm`,
+        { method: "DELETE" }
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.kid(kidName) }),
+  });
+}
+
+export function useCreateShortlink(ip: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api<unknown>(`/api/devices/${encodeURIComponent(ip)}/shortlink`, { method: "POST" })
+        .then((d) => ShortlinkSchema.parse(d) as Shortlink),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.shortlink(ip) }),
+  });
+}
+
+export function useDeleteShortlink(ip: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api(`/api/devices/${encodeURIComponent(ip)}/shortlink`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.shortlink(ip) }),
   });
 }
 

@@ -12,6 +12,7 @@ class Settings:
     wg_easy_url: str
     adguard_url: str
     adguard_admin_password: str
+    adguard_ui_port: int
     admin_password: str
     alert_webhook_url: str | None
     smtp_host: str | None
@@ -29,6 +30,11 @@ class Settings:
     # slower cadence to reclaim disk space.
     retention_days: int
     max_events: int
+    # Counter buckets (domain_stats) — feed the overview dashboard. Separate
+    # retention so we can keep aggregate signal longer than raw events.
+    stats_retention_days: int
+    stats_bucket_secs: int
+    stats_flush_secs: int
     # Public origin of the MDM endpoints; embedded in enrollment profiles.
     # e.g. "https://gdlf.cliftonc.nl:8443". Empty disables /mdm/* routes.
     mdm_base_url: str
@@ -41,6 +47,7 @@ class Settings:
             wg_easy_url=os.environ.get("WG_EASY_URL", "http://wg-easy:51821"),
             adguard_url=os.environ.get("ADGUARD_URL", "http://adguard:80"),
             adguard_admin_password=os.environ.get("ADGUARD_ADMIN_PASSWORD", ""),
+            adguard_ui_port=int(os.environ.get("ADGUARD_UI_PORT") or 8082),
             admin_password=os.environ.get("ADMIN_PASSWORD", ""),
             alert_webhook_url=os.environ.get("ALERT_WEBHOOK_URL") or None,
             smtp_host=os.environ.get("SMTP_HOST") or None,
@@ -55,6 +62,9 @@ class Settings:
             tz=os.environ.get("TZ", "UTC"),
             retention_days=int(os.environ.get("RETENTION_DAYS") or 7),
             max_events=int(os.environ.get("MAX_EVENTS") or 200_000),
+            stats_retention_days=int(os.environ.get("STATS_RETENTION_DAYS") or 7),
+            stats_bucket_secs=int(os.environ.get("STATS_BUCKET_SECS") or 300),
+            stats_flush_secs=int(os.environ.get("STATS_FLUSH_SECS") or 30),
             mdm_base_url=os.environ.get("MDM_BASE_URL", ""),
         )
 

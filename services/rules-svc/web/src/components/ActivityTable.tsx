@@ -1,22 +1,24 @@
 import { Link } from "@tanstack/react-router";
 import {
   Button,
-  Chip,
   Table,
   TableBody,
   TableCell,
   TableColumn,
   TableHeader,
   TableRow,
+  Tooltip,
 } from "@heroui/react";
 import type { Event } from "../lib/schemas";
 
-function decisionColor(decision: string) {
-  if (decision === "block" || decision === "dns_block") return "danger";
-  if (decision === "flag" || decision === "tls_failed") return "warning";
-  if (decision === "passthrough") return "primary";
-  if (decision === "sni_only") return "default";
-  return "success";
+// Dot color → tailwind bg class. Kept off HeroUI's Chip palette so the dot
+// is a fixed solid colour (Chip variants pull in border/text styling).
+function decisionDotClass(decision: string): string {
+  if (decision === "block" || decision === "dns_block") return "bg-danger";
+  if (decision === "flag" || decision === "tls_failed") return "bg-warning";
+  if (decision === "passthrough") return "bg-primary";
+  if (decision === "sni_only") return "bg-default-400";
+  return "bg-success";
 }
 
 function decisionLabel(decision: string) {
@@ -30,6 +32,36 @@ function formatTime(iso: string | null): string {
   return new Date(iso).toLocaleTimeString([], { hour12: false });
 }
 
+// Compound second-level public suffixes that appear in kid browsing often
+// enough to be worth special-casing. A full Public Suffix List (~50 KB)
+// would be more correct but the wrong-bolding for the long tail is purely
+// cosmetic, so we lean lightweight.
+const COMPOUND_SUFFIXES = new Set([
+  "co.uk", "ac.uk", "gov.uk", "org.uk", "co.jp", "ne.jp",
+  "com.au", "net.au", "org.au", "co.nz", "co.za", "com.br",
+  "com.cn", "com.mx", "com.tw", "co.kr", "com.sg", "com.hk",
+  "co.in", "co.id", "com.tr", "com.ph", "com.my", "com.ar",
+]);
+
+// Split a hostname into [subdomainPrefix, registrable]. The registrable
+// (eTLD+1) is what we bold. IPs and single-label hosts return ["", host].
+function splitHost(host: string): [string, string] {
+  if (!host) return ["", ""];
+  // Strip port if any
+  const hostNoPort = host.replace(/:\d+$/, "");
+  // IPv4 / IPv6 — don't try to find a registrable, just bold the whole thing
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostNoPort) || hostNoPort.includes(":")) {
+    return ["", hostNoPort];
+  }
+  const labels = hostNoPort.split(".");
+  if (labels.length <= 2) return ["", hostNoPort];
+  const lastTwo = labels.slice(-2).join(".");
+  const takeThree = COMPOUND_SUFFIXES.has(lastTwo) && labels.length >= 3;
+  const registrable = labels.slice(takeThree ? -3 : -2).join(".");
+  const prefix = labels.slice(0, takeThree ? -3 : -2).join(".") + ".";
+  return [prefix, registrable];
+}
+
 export function ActivityTable({
   events,
   hideKid = false,
@@ -40,36 +72,40 @@ export function ActivityTable({
   return (
     <Table
       isCompact
+      removeWrapper
       aria-label="Activity events"
       classNames={{
         base: "overflow-x-auto",
-        table: "min-w-[560px]",
-        th: "text-xs uppercase tracking-wide",
-        td: "py-1.5 align-middle",
+        // table-fixed makes the URL column share the *remaining* width
+        // after the explicitly-sized columns. Without it the column
+        // auto-grows to fit the longest URL and pushes the table wide.
+        table: "min-w-[560px] w-full table-fixed",
+        th: "text-[11px] uppercase tracking-wide h-7 py-0",
+        td: "py-0.5 align-middle leading-tight",
       }}
     >
       <TableHeader>
-        <TableColumn key="time" width={80}>
+        <TableColumn key="time" width={70}>
           Time
         </TableColumn>
-        <TableColumn key="decision" width={110}>
-          Decision
+        <TableColumn key="decision" width={20} align="center">
+          {""}
         </TableColumn>
-        <TableColumn key="kind" width={70} className="hidden sm:table-cell">
+        <TableColumn key="kind" width={60} className="hidden sm:table-cell">
           Kind
         </TableColumn>
         <TableColumn
           key="who"
-          width={hideKid ? 140 : 200}
+          width={hideKid ? 130 : 180}
           className="hidden md:table-cell"
         >
           {hideKid ? "Device" : "Kid · device"}
         </TableColumn>
         <TableColumn key="url">URL</TableColumn>
-        <TableColumn key="rule" width={180} className="hidden lg:table-cell">
+        <TableColumn key="rule" width={160} className="hidden lg:table-cell">
           Rule
         </TableColumn>
-        <TableColumn key="action" width={90} align="end">
+        <TableColumn key="action" width={70} align="end">
           {""}
         </TableColumn>
       </TableHeader>
@@ -77,17 +113,20 @@ export function ActivityTable({
         {(e) => (
           <TableRow key={`${e.id ?? "live"}-${e.ts}-${e.host}`}>
             <TableCell>
-              <span className="font-mono text-xs text-default-500 whitespace-nowrap">
+              <span className="font-mono text-[11px] text-default-500 whitespace-nowrap">
                 {formatTime(e.ts)}
               </span>
             </TableCell>
             <TableCell>
-              <Chip size="sm" color={decisionColor(e.decision)} variant="flat">
-                {decisionLabel(e.decision)}
-              </Chip>
+              <Tooltip content={decisionLabel(e.decision)} placement="right" delay={300}>
+                <span
+                  aria-label={decisionLabel(e.decision)}
+                  className={`inline-block w-2 h-2 rounded-full ${decisionDotClass(e.decision)}`}
+                />
+              </Tooltip>
             </TableCell>
             <TableCell className="hidden sm:table-cell">
-              <span className="text-xs font-mono text-default-500">
+              <span className="text-[11px] font-mono text-default-500">
                 {e.kind ?? "—"}
               </span>
             </TableCell>
@@ -95,23 +134,15 @@ export function ActivityTable({
               <Who event={e} hideKid={hideKid} />
             </TableCell>
             <TableCell>
+              {/* min-w-0 lets the truncating child shrink inside the
+                  fixed-layout table column. The link itself uses `block
+                  truncate` so it ellipsises at whatever width the column
+                  ended up with. Clicking opens host+path in a new tab
+                  (we drop the query — it's just for context). */}
               <div className="flex flex-col min-w-0">
-                {/* Cap URL width per breakpoint so long paths don't push
-                    the table past the viewport. */}
-                <div
-                  className="font-mono text-xs truncate max-w-[14rem] sm:max-w-[20rem] md:max-w-[22rem] lg:max-w-[28rem] xl:max-w-[36rem]"
-                  title={`${e.host}${e.path ?? ""}${
-                    e.query ? `?${e.query}` : ""
-                  }`}
-                >
-                  {e.host}
-                  {e.path}
-                  {e.query ? (
-                    <span className="text-default-400">?{e.query}</span>
-                  ) : null}
-                </div>
+                <HostUrl event={e} />
                 {/* Mobile: collapse Kid·device + Rule under the URL */}
-                <div className="md:hidden text-[11px] text-default-500 mt-0.5 truncate">
+                <div className="md:hidden text-[10px] text-default-500 truncate">
                   <Who event={e} hideKid={hideKid} />
                   {e.rule && (
                     <span className="text-default-400"> · {e.rule}</span>
@@ -121,7 +152,7 @@ export function ActivityTable({
             </TableCell>
             <TableCell className="hidden lg:table-cell">
               <span
-                className="text-default-500 text-xs truncate block"
+                className="text-default-500 text-[11px] truncate block"
                 title={e.rule ?? ""}
               >
                 {e.rule ?? "—"}
@@ -140,6 +171,7 @@ export function ActivityTable({
                   }}
                   size="sm"
                   variant="light"
+                  className="h-6 min-w-0 px-2 text-xs"
                 >
                   Rule
                 </Button>
@@ -151,6 +183,25 @@ export function ActivityTable({
         )}
       </TableBody>
     </Table>
+  );
+}
+
+function HostUrl({ event: e }: { event: Event }) {
+  const [prefix, registrable] = splitHost(e.host);
+  const titleFull = `${e.host}${e.path ?? ""}${e.query ? `?${e.query}` : ""}`;
+  return (
+    <a
+      href={`https://${e.host}${e.path ?? ""}`}
+      target="_blank"
+      rel="noreferrer"
+      className="block truncate font-mono text-[11px] text-foreground hover:text-primary hover:underline"
+      title={titleFull}
+    >
+      {prefix && <span className="text-default-500">{prefix}</span>}
+      <span className="font-semibold">{registrable}</span>
+      {e.path}
+      {e.query ? <span className="text-default-300">?{e.query}</span> : null}
+    </a>
   );
 }
 
@@ -178,9 +229,9 @@ function Who({ event: e, hideKid }: { event: Event; hideKid: boolean }) {
     ) : (
       <span className="text-default-500">{e.device ?? e.client_ip}</span>
     );
-  if (hideKid) return <span className="text-sm">{deviceEl}</span>;
+  if (hideKid) return <span className="text-xs">{deviceEl}</span>;
   return (
-    <span className="text-sm">
+    <span className="text-xs">
       {kidEl} <span className="text-default-400">·</span> {deviceEl}
     </span>
   );

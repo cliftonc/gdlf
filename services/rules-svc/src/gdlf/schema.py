@@ -45,6 +45,36 @@ class MdmState(BaseModel):
 AndroidMdmStatus = Literal["pending", "active", "disabled", "deleted"]
 
 
+WindowsMdmStatus = Literal["pending", "enrolled", "revoked"]
+
+
+class WindowsMdmState(BaseModel):
+    """Per-device Windows enrolment state.
+
+    Asymmetric vs Apple/Android: there's no live two-way channel after the
+    provisioning package is applied. The .ppkg is a one-shot installer that
+    drops the CA + WireGuard + a SYSTEM reconcile task on the kid's PC. The
+    parent attests "applied" from the dashboard once they've run it.
+
+      * `package_id`     — GUID baked into customizations.xml as `<ID>`.
+                           Stays stable across re-issues so a fresh .ppkg
+                           replaces (rather than stacks with) the old one.
+      * `package_version`— bumped on every (re-)build; surfaces in
+                           customizations.xml's `<Version>` element.
+      * `conf_sha256`    — hash of the per-kid wg-quick conf baked into
+                           the package. The reconcile.ps1 script compares
+                           this against the on-disk conf and rewrites if
+                           the file has drifted.
+    """
+    model_config = ConfigDict(extra="forbid")
+    status: WindowsMdmStatus = "pending"
+    package_id: str
+    package_version: str
+    conf_sha256: str
+    enrolled_at: datetime | None = None
+    last_built_at: datetime | None = None
+
+
 class AndroidMdmState(BaseModel):
     """Per-device Android Management API (AMAPI) enrolment state.
 
@@ -87,6 +117,9 @@ class Device(BaseModel):
     mdm: MdmState | None = None
     # Optional Android Management API enrolment state.
     android_mdm: AndroidMdmState | None = None
+    # Optional Windows enrolment state (provisioning-package based — see
+    # gdlf.windows_mdm). One-shot, no live channel.
+    windows_mdm: WindowsMdmState | None = None
 
 
 class ScheduleWindow(BaseModel):
@@ -136,6 +169,12 @@ class Kid(BaseModel):
     # Hosts (fnmatch globs) that mitmproxy should let through untouched — for
     # pinned-cert apps that refuse our CA. Matched against TLS SNI.
     mitm_passthrough_hosts: list[str] = []
+    # Registrable domains (eTLD+1, e.g. "tiktok.com") the parent explicitly
+    # opted *out* of auto-passthrough. New TLS failures matching one of these
+    # are NOT auto-added to `mitm_passthrough_hosts`; toggling a group off in
+    # the Passthrough tab records the registrable here so the next retry from
+    # the device doesn't re-enable it.
+    mitm_passthrough_disabled: list[str] = []
 
 
 class KidsConfig(BaseModel):

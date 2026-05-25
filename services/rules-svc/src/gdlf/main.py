@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import (
     adguard,
+    aggregates,
     alerts,
     api_activity,
     api_android_mdm,
@@ -38,13 +39,18 @@ from . import (
     api_rules,
     api_services,
     api_settings,
+    api_shortlinks,
+    api_stats,
     api_tls_failures,
+    api_windows_mdm,
     auth,
+    bulk_cdns,
     db,
     pubsub,
     store,
     wg,
 )
+from .api_tls_failures import registrable_domain
 from .amapi import orchestrator as amapi_orchestrator
 from .rules import evaluate
 from .settings import settings
@@ -59,9 +65,18 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError:
         pass
     db.engine()
+    try:
+        n = api_shortlinks.ensure_shortlinks_for_all_devices()
+        if n:
+            import logging
+            logging.getLogger("gdlf.shortlinks").info("backfilled %d device shortlink(s)", n)
+    except Exception as e:
+        import logging
+        logging.getLogger("gdlf.shortlinks").warning("shortlink backfill failed: %s", e)
     store.bind_event_loop(asyncio.get_running_loop())
     sync_task = asyncio.create_task(adguard.sync_loop())
     prune_task = asyncio.create_task(_prune_loop())
+    flush_task = asyncio.create_task(aggregates.flush_loop())
     amapi_task = asyncio.create_task(amapi_orchestrator.status_sync_loop())
     amapi_watch_task = asyncio.create_task(_amapi_policy_watch_loop())
     try:
@@ -69,6 +84,7 @@ async def lifespan(app: FastAPI):
     finally:
         sync_task.cancel()
         prune_task.cancel()
+        flush_task.cancel()
         amapi_task.cancel()
         amapi_watch_task.cancel()
 
@@ -113,9 +129,16 @@ async def _prune_loop():
     runs = 0
     while True:
         try:
-            res = db.prune(settings.retention_days, settings.max_events)
-            if res["age_deleted"] or res["cap_deleted"]:
-                log.info("pruned: age=%d cap=%d", res["age_deleted"], res["cap_deleted"])
+            res = db.prune(
+                settings.retention_days,
+                settings.max_events,
+                stats_retention_days=settings.stats_retention_days,
+            )
+            if res["age_deleted"] or res["cap_deleted"] or res.get("stats_deleted"):
+                log.info(
+                    "pruned: age=%d cap=%d stats=%d",
+                    res["age_deleted"], res["cap_deleted"], res.get("stats_deleted", 0),
+                )
             runs += 1
             if runs % 24 == 0:
                 db.vacuum()
@@ -138,6 +161,9 @@ app.include_router(api_settings.router)
 app.include_router(api_tls_failures.router)
 app.include_router(api_mdm.router)
 app.include_router(api_android_mdm.router)
+app.include_router(api_windows_mdm.router)
+app.include_router(api_shortlinks.router)
+app.include_router(api_stats.router)
 
 # Where the multi-stage Dockerfile lands the built SPA. The dev server
 # (`./gdlf web-dev`) runs Vite separately and proxies /api back to here, so
@@ -166,23 +192,64 @@ _PUBLIC_API_PATHS = {
     "/api/tls-failures",
     "/api/auth/login",
 }
+_PUBLIC_API_PREFIXES = ("/api/dl/",)
 _PUBLIC_FILES = {"/favicon.png", "/logo-64.png", "/logo-256.png", "/gandalf.png"}
+
+# Regex used by `_dl_path_ip` to confirm a `?dl=<code>` query parameter is
+# being applied to an endpoint scoped to one device's wg_ip (the only thing
+# the code is authorised for). Matches the two URL shapes the enrolment
+# page uses: /api/devices/{ip}/... and /api/kids/{name}/devices/{ip}/....
+import re as _re
+_DL_PATH_RE = _re.compile(
+    r"^/api/(?:devices/(?P<ip1>[0-9.]+)(?:/|$)"
+    r"|kids/[^/]+/devices/(?P<ip2>[0-9.]+)(?:/|$))"
+)
+
+
+def _dl_path_ip(path: str) -> str | None:
+    m = _DL_PATH_RE.match(path)
+    if not m:
+        return None
+    return m.group("ip1") or m.group("ip2")
 
 
 def _is_public(path: str) -> bool:
     if path in _PUBLIC_PATHS or path in _PUBLIC_API_PATHS or path in _PUBLIC_FILES:
         return True
+    if any(path.startswith(p) for p in _PUBLIC_API_PREFIXES):
+        return True
     if path.startswith("/devices/") and (
         path.endswith("/conf")
         or path.endswith("/qr")
         or path.endswith("/android-mdm/qr.png")
+        or path.endswith("/windows-mdm/package.zip")
+        or path.endswith("/windows-mdm/package.ppkg")  # legacy URL
     ):
         return True
     # MDM endpoints: device-presented at TLS layer (mTLS verified by Caddy),
     # never reached by a browser; bypass the cookie auth.
     if path.startswith("/mdm/"):
         return True
+    # SPA shortlink page: served as the SPA shell to anyone with the URL.
+    # The page authenticates subsequent API calls via `?dl=<code>`.
+    if path.startswith("/dl/"):
+        return True
     return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+
+
+def _dl_auth_ok(request: Request) -> bool:
+    """Allow `?dl=<code>` to authenticate device-scoped /api/* requests.
+
+    The code is bound to a single wg_ip in the `device_shortlinks` table;
+    we accept the request iff the IP embedded in the URL path matches."""
+    code = request.query_params.get("dl")
+    if not code:
+        return False
+    ip = _dl_path_ip(request.url.path)
+    if not ip:
+        return False
+    bound = api_shortlinks.ip_for_code(code)
+    return bound is not None and bound == ip
 
 
 @app.middleware("http")
@@ -193,6 +260,8 @@ async def require_auth(request: Request, call_next):
     if _is_public(path):
         return await call_next(request)
     if auth.check_token(request.cookies.get(auth.COOKIE)):
+        return await call_next(request)
+    if path.startswith("/api/") and _dl_auth_ok(request):
         return await call_next(request)
     if path.startswith("/api/"):
         return JSONResponse({"error": "unauthenticated"}, status_code=401)
@@ -275,31 +344,67 @@ def healthz():
 # JSON API for mitmproxy + nftables sidecar. These two must stay byte-stable.
 
 
+_RAW_INSERT_DECISIONS = frozenset({"block", "flag", "tls_failed", "dns_block"})
+_RAW_INSERT_KINDS = frozenset({"page", "iframe"})
+
+
 @app.post("/api/events")
 async def post_event(request: Request):
-    """mitmproxy addon posts here. Body is JSON describing the request."""
+    """mitmproxy addon posts here. Body is JSON describing the request.
+
+    Two write paths now:
+      1. Counter increment (`aggregates.record`) for EVERY event — drives
+         the overview dashboard's domain panels. Flushed in batch to the
+         `domain_stats` table every ~30s.
+      2. Raw insert into the `events` table only for high-signal rows:
+         page/iframe navigations, or any block/flag/tls_failed/dns_block
+         regardless of kind. Sub-resource noise stays out.
+
+    SSE pubsub still fans out every event so the live activity stream
+    stays responsive — the table simply ignores anything not in its
+    default filter.
+    """
     payload = await request.json()
     cfg = store.load()
     client_ip = payload.get("client_ip", "")
     found = cfg.device_by_ip(client_ip)
     kid_name = found[0].name if found else None
     device_name = found[1].name if found else None
+    decision = payload.get("decision", "allow")
+    kind = payload.get("kind")
+    host = payload.get("host", "")
+
+    # Counters are kept at registrable-domain (eTLD+1) level so the overview
+    # collapses `www.example.com` and `api.example.com` into one `example.com`
+    # row. Raw `events` keeps the full host for forensic context.
+    aggregates.record(
+        kid=kid_name,
+        host=registrable_domain(host),
+        kind=kind,
+        decision=decision,
+    )
+
     ev = db.Event(
         source="mitmproxy",
         client_ip=client_ip,
         kid=kid_name,
         device=device_name,
         method=payload.get("method"),
-        host=payload.get("host", ""),
+        host=host,
         path=payload.get("path"),
         query=payload.get("query"),
         status=payload.get("status"),
-        decision=payload.get("decision", "allow"),
+        decision=decision,
         rule=payload.get("rule"),
         sni_only=bool(payload.get("sni_only", False)),
-        kind=payload.get("kind"),
+        kind=kind,
     )
-    db.insert(ev)
+    should_persist = (
+        decision in _RAW_INSERT_DECISIONS
+        or (kind or "") in _RAW_INSERT_KINDS
+    )
+    if should_persist:
+        db.insert(ev)
     # Fan out to SSE subscribers — build the DTO from the payload (not the
     # ORM instance) to avoid SQLAlchemy detached-instance access after commit.
     pubsub.publish({
@@ -366,22 +471,56 @@ def _in_any_window(now, spec: str) -> bool:
 
 @app.get("/api/passthrough")
 def get_passthrough():
-    """Map of `wg_ip -> [host glob]` consumed by the mitmproxy addon.
+    """Per-kid + global passthrough lists consumed by the mitmproxy addon.
 
-    The addon polls this every ~30s and consults it in `tls_clienthello` to
-    decide whether to forward TLS untouched (for pinned-cert apps that refuse
-    our CA). Public-but-trusted: the mitm container runs in wg's netns and
-    reaches rules-svc over the bridge with no cookie.
+    The addon polls this every ~30s and consults it in `tls_clienthello`:
+      * `by_ip`   — per-kid opt-in passthrough (pinned-cert apps that refuse
+                    our CA, recorded via the TLS-failures table).
+      * `globals` — vendor bulk-content CDNs that we never want to MITM
+                    regardless of kid (game downloads, OS updates, etc.).
+                    Sourced from `gdlf.bulk_cdns.BULK_CDN_PATTERNS`.
+
+    Public-but-trusted: the mitm container runs in wg's netns and reaches
+    rules-svc over the bridge with no cookie.
     """
     cfg = store.load()
     out: dict[str, list[str]] = {}
+    blocked: list[str] = []
     for kid in cfg.kids:
-        if not kid.mitm_passthrough_hosts:
-            continue
         for d in kid.devices:
-            if d.wg_ip:
+            if not d.wg_ip:
+                continue
+            if kid.mitm_passthrough_hosts:
                 out[d.wg_ip] = list(kid.mitm_passthrough_hosts)
-    return JSONResponse({"by_ip": out})
+            # Mirror nftables' blocked_clients set so the addon can refuse to
+            # passthrough for clients that are currently network-blocked. Without
+            # this, TLS passthrough would silently bypass schedule / manual
+            # blocks (since nft's :443 reject deliberately exempts mitm clients
+            # and trusts mitmproxy to enforce policy at the decision layer).
+            if _network_block_reason(kid, d):
+                blocked.append(d.wg_ip)
+    return JSONResponse({
+        "by_ip": out,
+        "globals": list(bulk_cdns.BULK_CDN_PATTERNS),
+        "blocked_ips": blocked,
+    })
+
+
+@app.get("/api/bulk-cdns")
+def get_bulk_cdns():
+    """Grouped global CDN passthrough list — for display in the dashboard.
+
+    The dashboard's Passthrough tab renders this read-only alongside the
+    per-kid opt-in list, so the parent can see exactly which vendors are
+    being skipped by default.
+    """
+    return JSONResponse({
+        "groups": [
+            {"vendor": vendor, "patterns": list(patterns)}
+            for vendor, patterns in bulk_cdns.BULK_CDN_GROUPS.items()
+        ],
+        "total": len(bulk_cdns.BULK_CDN_PATTERNS),
+    })
 
 
 @app.post("/api/decision")

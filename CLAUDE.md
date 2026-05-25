@@ -94,6 +94,7 @@ config/
     apns/                   # Apple Push cert (push.pem) + helpers (`./gdlf apns`)
     mdm-ca/                 # signing CA for per-device MDM identity certs
     amapi/                  # Android Management API: GCP creds + enterprise.json
+    windows/                # Windows enrolment: bundled WG MSI + stashed .ppkgs
     caddy/                  # Caddy ACME + state (Let's Encrypt cert)
 nftables/                   # firewall sidecar (Alpine + nft + Python)
 scripts/
@@ -124,11 +125,15 @@ Each subdirectory has its own `CLAUDE.md` with the specifics.
 
 # MDM (Android via Android Management API, optional — see docs/setup-android-mdm.md):
 ./gdlf amapi ...   # AMAPI setup: GCP service-account + EMM enterprise signup
+
+# Windows (signed Provisioning Package, optional — see docs/setup-windows-mdm.md):
+./gdlf windows ... # download the WG MSI; check signing CA — no live channel
 ```
 
 End-to-end MDM setup walk-throughs:
 - [docs/setup-android-mdm.md](docs/setup-android-mdm.md) — Android (~15 min, simpler)
 - [docs/setup-apple-mdm.md](docs/setup-apple-mdm.md) — iOS (~30 min, more pieces)
+- [docs/setup-windows-mdm.md](docs/setup-windows-mdm.md) — Windows (~10 min, one-shot .ppkg)
 
 `./gdlf up` automatically enables the `mdm` compose profile (which adds the
 Caddy front-door for /mdm/*) when `MDM_HOSTNAME` is set in `.env`.
@@ -155,11 +160,13 @@ standalone `docker-compose` binary.
   set Private DNS to `dns.google`. We could `nft drop` :853 outbound to
   force fallback, but the parent's threat model here is guardrail not
   containment. **EXCEPT** for iOS devices enrolled in MDM (see
-  `services/rules-svc/CLAUDE.md` § MDM) and Android devices enrolled via
-  AMAPI as Device Owner: for those, the WireGuard tunnel is always-on
-  and non-removable, the CA is system-trusted, and adding another VPN /
-  profile is restricted at the OS level — so the guardrail becomes
-  containment for those platforms.
+  `services/rules-svc/CLAUDE.md` § MDM), Android devices enrolled via
+  AMAPI as Device Owner, and Windows devices enrolled via the gdlf
+  Provisioning Package (kid running as Standard User; WG per-tunnel
+  service is ACL'd, kernel kill-switch on): for those, the WireGuard
+  tunnel is always-on and non-removable, the CA is system-trusted, and
+  adding another VPN / profile is restricted at the OS level — so the
+  guardrail becomes containment for those platforms.
 * **QUIC (UDP/443) is blocked for `mitm_clients`** so browsers fall back
   to TCP/TLS and mitmproxy can actually see traffic. Devices without the
   CA still get QUIC; we just can't inspect them beyond DNS / SNI.

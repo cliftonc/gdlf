@@ -39,6 +39,18 @@ export const AndroidMdmStateSchema = z.object({
 });
 export type AndroidMdmState = z.infer<typeof AndroidMdmStateSchema>;
 
+export const WindowsMdmStatusEnum = z.enum(["pending", "enrolled", "revoked"]);
+export type WindowsMdmStatus = z.infer<typeof WindowsMdmStatusEnum>;
+
+export const WindowsMdmStateSchema = z.object({
+  status: WindowsMdmStatusEnum,
+  package_id: z.string(),
+  package_version: z.string(),
+  enrolled_at: z.string().nullable(),
+  last_built_at: z.string().nullable(),
+});
+export type WindowsMdmState = z.infer<typeof WindowsMdmStateSchema>;
+
 export const DeviceSchema = z.object({
   name: z.string(),
   platform: PlatformEnum,
@@ -54,6 +66,7 @@ export const DeviceSchema = z.object({
   // payload (pre-Phase-5 backend) doesn't break the dashboard.
   mdm: MdmStateSchema.nullish(),
   android_mdm: AndroidMdmStateSchema.nullish(),
+  windows_mdm: WindowsMdmStateSchema.nullish(),
 });
 export type Device = z.infer<typeof DeviceSchema>;
 
@@ -103,6 +116,15 @@ export const ScheduleSchema = z.object({
 });
 export type Schedule = z.infer<typeof ScheduleSchema>;
 
+export const KidSummaryDeviceSchema = z.object({
+  name: z.string(),
+  platform: PlatformEnum,
+  wg_ip: z.string(),
+  online: z.boolean(),
+  manual_block: z.boolean(),
+});
+export type KidSummaryDevice = z.infer<typeof KidSummaryDeviceSchema>;
+
 export const KidSummarySchema = z.object({
   name: z.string(),
   age: z.number().nullable(),
@@ -112,8 +134,37 @@ export const KidSummarySchema = z.object({
   device_count: z.number(),
   online_device_count: z.number(),
   rule_count: z.number(),
+  devices: z.array(KidSummaryDeviceSchema).default([]),
 });
 export type KidSummary = z.infer<typeof KidSummarySchema>;
+
+export const StatsTopHostSchema = z.object({
+  host: z.string(),
+  requests: z.number(),
+  pages: z.number(),
+  blocked: z.number(),
+});
+export type StatsTopHost = z.infer<typeof StatsTopHostSchema>;
+
+export const KidStatsSchema = z.object({
+  kid: z.string(),
+  last_seen: z.string().nullable(),
+  requests_1h: z.number(),
+  pages_1h: z.number(),
+  blocked_1h: z.number(),
+  requests_24h: z.number(),
+  pages_24h: z.number(),
+  blocked_24h: z.number(),
+  top_hosts_1h: z.array(StatsTopHostSchema),
+  sparkline_1h: z.array(z.number()),
+  bucket_secs: z.number(),
+});
+export type KidStats = z.infer<typeof KidStatsSchema>;
+
+export const KidStatsDetailSchema = KidStatsSchema.extend({
+  top_hosts_24h: z.array(StatsTopHostSchema).default([]),
+});
+export type KidStatsDetail = z.infer<typeof KidStatsDetailSchema>;
 
 export const KidDetailSchema = z.object({
   name: z.string(),
@@ -124,6 +175,7 @@ export const KidDetailSchema = z.object({
   blocked_apps: z.array(z.string()),
   keyword_flags: z.array(z.string()),
   mitm_passthrough_hosts: z.array(z.string()),
+  mitm_passthrough_disabled: z.array(z.string()).default([]),
   devices: z.array(DeviceSchema),
   rules: z.array(RuleSchema),
 });
@@ -157,6 +209,9 @@ export const SettingsSchema = z.object({
   tz: z.string(),
   wg_host: z.string(),
   wg_port: z.number(),
+  adguard_ui_port: z.number(),
+  adguard_admin_user: z.string(),
+  adguard_admin_password: z.string(),
   db_stats: z.object({
     events: z.number(),
     oldest: z.string().nullable(),
@@ -188,14 +243,34 @@ export const TlsFailureChildSchema = z.object({
 });
 export type TlsFailureChild = z.infer<typeof TlsFailureChildSchema>;
 
+export const BulkCdnGroupSchema = z.object({
+  vendor: z.string(),
+  patterns: z.array(z.string()),
+});
+export type BulkCdnGroup = z.infer<typeof BulkCdnGroupSchema>;
+
 export const TlsFailureGroupSchema = z.object({
   registrable: z.string(),
   kid: z.string().nullable(),
+  enabled: z.boolean().default(true),
   count: z.number(),
   ts_last: z.string().nullable(),
   children: z.array(TlsFailureChildSchema),
 });
 export type TlsFailureGroup = z.infer<typeof TlsFailureGroupSchema>;
+
+export const ShortlinkSchema = z.object({
+  code: z.string(),
+  url: z.string(),
+});
+export type Shortlink = z.infer<typeof ShortlinkSchema>;
+
+export const DlResolveSchema = z.object({
+  kid: z.string(),
+  ip: z.string(),
+  device_name: z.string(),
+});
+export type DlResolve = z.infer<typeof DlResolveSchema>;
 
 export const HandshakeSchema = z.object({
   last_handshake: z.number(),

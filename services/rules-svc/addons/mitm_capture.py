@@ -78,6 +78,20 @@ def _is_sni_noise(host: str) -> bool:
     return any(fnmatch.fnmatchcase(host, p) for p in SNI_NOISE_PATTERNS)
 
 
+# Bulk-CDN passthrough list is sourced from rules-svc at runtime (see
+# `gdlf/bulk_cdns.py`). The addon polls /api/passthrough and reads `globals`
+# from the response — same loop that already syncs the per-kid hosts.
+# A tiny hardcoded fallback covers the cold-start window before the first
+# successful poll, plus the case where rules-svc is briefly unavailable;
+# without it, a stack restart would let Steam etc. through mitm with full
+# decrypt cost for ~30s.
+_BULK_CDN_FALLBACK: tuple[str, ...] = (
+    "*.steamcontent.com",
+    "*.windowsupdate.com",
+    "*.dl.delivery.mp.microsoft.com",
+)
+
+
 # Sec-Fetch-Dest values that map to "asset" (sub-resource, not a navigation).
 # Modern browsers (Chrome / Firefox / Safari / Edge / Android Chrome) set
 # this on every request. See:
@@ -212,6 +226,14 @@ class GdlfAddon:
         self._log = logging.getLogger("gdlf")
         # ip -> [glob, ...]; refreshed by _passthrough_refresh_loop.
         self._passthrough: dict[str, list[str]] = {}
+        # Bulk-CDN globs — same refresh loop, applies to all clients.
+        self._bulk_cdn: tuple[str, ...] = _BULK_CDN_FALLBACK
+        # Client IPs that are currently network-blocked (schedule / manual).
+        # We refuse to passthrough TLS for these — falling through to MITM lets
+        # /api/decision serve the block page. Without this, passthrough silently
+        # bypasses schedule enforcement (nft's :443 reject exempts mitm clients
+        # and trusts mitmproxy to enforce policy at the decision layer).
+        self._blocked_ips: frozenset[str] = frozenset()
         self._passthrough_task: asyncio.Task | None = None
         # (client_ip, host, decision) -> monotonic timestamp of last emit;
         # used to suppress repeated TLS failure / passthrough events from
@@ -230,14 +252,25 @@ class GdlfAddon:
             try:
                 r = await self._client.get(f"{RULES_SVC_URL}/api/passthrough")
                 r.raise_for_status()
-                by_ip = (r.json() or {}).get("by_ip") or {}
+                body = r.json() or {}
+                by_ip = body.get("by_ip") or {}
                 self._passthrough = {
                     ip: [str(h).lower() for h in hosts]
                     for ip, hosts in by_ip.items()
                 }
+                globs = body.get("globals")
+                if isinstance(globs, list) and globs:
+                    self._bulk_cdn = tuple(str(g).lower() for g in globs)
+                blocked = body.get("blocked_ips")
+                if isinstance(blocked, list):
+                    self._blocked_ips = frozenset(str(ip) for ip in blocked)
             except Exception as e:
                 self._log.debug("passthrough refresh failed: %s", e)
             await asyncio.sleep(PASSTHROUGH_REFRESH_SECS)
+
+    def _is_bulk_cdn(self, host: str) -> bool:
+        h = (host or "").lower()
+        return any(fnmatch.fnmatchcase(h, p) for p in self._bulk_cdn)
 
     def _passthrough_match(self, client_ip: str, sni: str) -> str | None:
         """Return the matched glob if `sni` should be passed through for
@@ -330,6 +363,12 @@ class GdlfAddon:
                 403, BLOCK_PAGE, {"Content-Type": "text/html; charset=utf-8"},
             )
 
+        # Send every event to rules-svc; the server-side handler now decides
+        # what hits the raw `events` table (page/iframe navigations + any
+        # block/flag/tls_failed/dns_block) versus what just bumps the
+        # `domain_stats` counters. Bulk-CDN traffic still gates the raw
+        # insert via the kind classifier (asset/xhr) but contributes to
+        # per-domain counters so the overview reflects real volume.
         self._post_event(
             {
                 "client_ip": client_ip,
@@ -365,13 +404,46 @@ class GdlfAddon:
             return
         if not sni or not client_ip:
             return
+        # If the client is currently network-blocked (schedule out-of-window /
+        # manual block / kid-wide block), refuse to passthrough — let the
+        # connection fall through to normal MITM so /api/decision serves the
+        # block page. Otherwise schedule enforcement leaks: nft's :443 reject
+        # exempts mitm clients on purpose, trusting us to enforce policy here.
+        if client_ip in self._blocked_ips:
+            return
+        # Bulk-content CDNs (Steam, Windows Update, etc.) are passed through
+        # globally — no per-kid opt-in. Decrypting GBs of game binaries is
+        # pure CPU cost with no parental-control benefit.
+        if self._is_bulk_cdn(sni):
+            data.ignore_connection = True
+            return
         matched = self._passthrough_match(client_ip, sni)
         if not matched:
             return
         data.ignore_connection = True
-        # No activity-log emit: passthrough is a steady-state behaviour the
-        # parent already opted into via the Passthrough tab. The dashboard
-        # surfaces *new* TLS failures via the tls_failures table instead.
+        # Counter-only emit: we can't see inside the encrypted stream, but
+        # we know this kid is hitting this SNI. The server-side gating drops
+        # this row from the raw `events` table (decision=passthrough not in
+        # the persist set, kind=None) — the only effect is bumping
+        # `domain_stats` so passthrough domains still appear in the
+        # overview's top-hosts panel. Without this, sites the parent
+        # whitelisted (reddit, guardian, youtube, ...) are invisible to the
+        # dashboard, which is the opposite of useful.
+        self._post_event(
+            {
+                "client_ip": client_ip,
+                "method": None,
+                "host": sni,
+                "path": None,
+                "query": None,
+                "decision": "passthrough",
+                "rule": matched,
+                "flag": False,
+                "sni_only": False,
+                "status": None,
+                "kind": None,
+            }
+        )
 
     def tls_failed_client(self, data: TlsData) -> None:
         """The client refused our cert — record the SNI so the Passthrough

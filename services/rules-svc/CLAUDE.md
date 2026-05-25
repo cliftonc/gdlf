@@ -30,7 +30,11 @@ isn't directly forwarding packets goes through here.
 | `api_activity.py`| Activity list + SSE stream.                                           |
 | `api_settings.py`| Settings + DB stats + prune-now.                                      |
 | `api_mdm.py`     | Apple iOS MDM: enrollment-token issuance, `.mobileconfig` serving, `/mdm/checkin`, `/mdm/server`, admin push + command endpoints. |
-| `mdm/`           | MDM internals (see § MDM below).                                       |
+| `api_android_mdm.py` | Android Management API: per-device enrollment tokens, QR PNGs, policy + status sync endpoints. |
+| `api_windows_mdm.py` | Windows Provisioning Package endpoints: build `.ppkg`, serve single-use download, parent-attest enrolment, revoke. |
+| `mdm/`           | Apple MDM internals (see § MDM below).                                 |
+| `amapi/`         | Android Management API internals (see § MDM (Android) below).          |
+| `windows_mdm/`   | Windows enrolment package internals (see § MDM (Windows) below).        |
 | `dto.py`         | Shared projection from pydantic models to JSON DTOs.                  |
 | `pubsub.py`      | In-process publish/subscribe used by SSE.                             |
 | `schema.py`      | Pydantic v2 models for kids.yaml. Single source of contract.          |
@@ -283,6 +287,136 @@ Don't go looking for these — they don't exist on the Android side:
 * **Status poll is the only way we discover enrolment** — the device
   doesn't tell us when it's done; it tells Google. We learn via the next
   60s poll, so freshly-enrolled devices show "pending" for up to a minute.
+
+## MDM (Windows, downloadable .zip)
+
+The Windows path is deliberately asymmetric vs Apple / Android: **there
+is no live channel after enrolment**. A per-device `.zip` is generated
+on demand, containing a self-elevating `Install.cmd` plus PowerShell
+scripts + WG MSI + per-kid conf + CA. The parent extracts it on the
+kid's PC and runs `Install.cmd` as Administrator (UAC). After that, the
+only ongoing enforcement is what install.ps1 set up locally — the
+per-tunnel WireGuard Windows service (kernel kill-switch + service ACL),
+the `LimitedOperatorUI` registry flag, the gdlf CA in `LocalMachine\Root`,
+and a SYSTEM scheduled task that re-asserts state every 5 minutes.
+
+**Why not .ppkg?** We tried. Building a Windows Provisioning Package
+from Python is not viable — `.ppkg` is internally a WIM archive with a
+compiled multi-XML structure (CommonSettings + Multivariant +
+MasterDatastore + RunTime + per-setting `.provxml` files keyed by
+undocumented SettingsGroup GUIDs). Only icd.exe / Windows Configuration
+Designer can produce a compliant one; anything else gets "Enter the
+package password" at apply time then fails to aka.ms/provisioningfaq.
+See [docs/setup-windows-mdm.md](../../docs/setup-windows-mdm.md) for
+the user-facing version of this story.
+
+The reason for the broader "no MDM CSP" choice: VPNv2 CSP doesn't speak
+WireGuard natively, and OMA-DM enrolment isn't available on Home edition
+anyway. WireGuard for Windows already provides everything a real MDM
+channel would — its per-tunnel service is ACL'd against non-admins and
+installs WFP kernel filters that drop untunneled traffic. So gdlf wraps
+that plus the CA + reconcile task in a `.zip` an Administrator runs once.
+
+### How a device gets enrolled
+
+1. **Setup (one time per appliance)**:
+   * `./gdlf windows init` — fetches the official WireGuard for Windows
+     MSI to `config/state/windows/wireguard.msi`, pinned-version with
+     SHA256 verification. Bundled into every per-device `.zip`.
+   * (No MDM CA needed — we don't sign anything on the Windows path.)
+
+2. **Per-device build**: dashboard `POST /api/devices/{ip}/windows-mdm/enroll-package`
+   assembles `Install.cmd` + `install.ps1` + `reconcile.ps1` (per-device,
+   templated) plus per-kid wg-quick conf + mitmproxy CA (DER) + WireGuard
+   MSI + `README.txt`, packs them into a `.zip` via Python's stdlib
+   `zipfile`. Returns a one-time download URL. (The endpoint name and
+   `BuiltPackage` field names still say `ppkg` for backwards compat with
+   stored state.)
+
+3. **Provisioning**: parent extracts the .zip on the kid's PC,
+   right-clicks `Install.cmd` → Run as administrator (or double-clicks
+   for the same effect via the script's self-elevation snippet). UAC
+   prompts; on approval, install.ps1 runs as Administrator. install.ps1
+   imports the CA into `LocalMachine\Root`, silent-installs WireGuard,
+   drops the conf, `wireguard.exe /installtunnelservice`, sets
+   `LimitedOperatorUI=1`, registers the SYSTEM reconcile scheduled task,
+   and stamps the `HKLM\Software\gdlf\Enrollment` registry key.
+
+4. **Steady state**: SYSTEM scheduled task `gdlf-reconcile` runs on
+   boot + every 5 minutes. Reads the enrollment registry key, re-asserts
+   service Running + Automatic, re-checks the conf hash matches what
+   was baked in, re-asserts LimitedOperatorUI.
+
+5. **Containment**: the kid runs as **Standard User**, the parent is
+   the sole local Administrator. The kid can't stop the WG service
+   (ACL), can't `Unregister-ScheduledTask` (Admin-only), can't
+   `certutil -delstore Root` (Admin-only), can't open
+   `C:\ProgramData\gdlf\` (ACL we set in install.ps1).
+
+### Module map (`windows_mdm/`)
+
+| File                | Responsibility                                                          |
+| ------------------- | ----------------------------------------------------------------------- |
+| `package.py`        | `build_enroll_ppkg` / `build_revoke_ppkg` — assemble files, zip them via stdlib `zipfile`. Plus on-disk `packages_dir` + stash/unstash helpers for the download endpoint. |
+| `scripts.py`        | `Install.cmd` / `Uninstall.cmd` (self-elevating UAC wrappers), `install.ps1` and `reconcile.ps1` (per-device, substituted at build time), `uninstall.ps1` (static). |
+| `wireguard_conf.py` | Thin wrapper over `gdlf.wg.build_client_conf` so package.py doesn't have to reconstruct peer ids. |
+
+### What's NOT in the Windows path (vs iOS / Android)
+
+Don't look for these — they don't exist:
+
+* No identity certs / mTLS — Windows never calls back, so there's nothing
+  to authenticate.
+* No `/mdm/checkin` / `/mdm/server` equivalents.
+* No status sync loop — `mark-enrolled` is parent-attested via the
+  dashboard.
+* No command queue / response tables — policy is fully embedded in the
+  .zip at build time; "pushing a change" means re-issuing the bundle.
+* No customizations.xml / WCD / icd dependencies.
+* No Authenticode signing — nothing to sign (it's a plain zip).
+
+### Gotchas
+
+* **No external runtime deps.** Just Python stdlib `zipfile` + `cryptography`
+  (already a base dep). The earlier `gcab` / `osslsigncode` packages have
+  been removed from the Dockerfile.
+* **The `package_id` GUID must stay stable per (kid, device)** — derived
+  via UUIDv5 of the peer_id in `_stable_package_id`. Bumping the
+  namespace UUID would orphan every previously-recorded `WindowsMdmState`
+  in kids.yaml.
+* **`package_version` is bookkeeping-only on the zip path.** There's no
+  Windows-side "is this newer" check — install.ps1 is idempotent and
+  always overwrites. The version is kept so the dashboard can show "last
+  built v1.0.…" for parent awareness.
+* **PowerShell here-strings have ugly `$` quirks** — `scripts.py` uses
+  plain `__NAME__` placeholders rather than f-strings so the raw `.ps1`
+  stays readable. Adding a new placeholder also needs a `_substitute`
+  line.
+* **install.ps1 phones home at the end.** Last step POSTs
+  `<dashboard>/api/devices/<ip>/windows-mdm/mark-enrolled?dl=<shortlink>`
+  so the parent doesn't have to click Mark Applied. Best-effort: 5
+  attempts with 3s sleep then gives up. The dashboard URL is captured
+  from the `Origin` header of the build request (whatever URL the
+  parent's browser is on); the shortlink is looked up (or minted) by
+  `api_shortlinks`. Falls back gracefully on any failure — manual
+  Mark Applied button stays as the safety net. uninstall.ps1 does the
+  same thing first-thing, before tearing down the tunnel (it reads
+  DashboardBaseUrl + Shortlink from the registry stamp install.ps1 left).
+* **install.ps1's `$assetDir` is `$PSScriptRoot`.** `Install.cmd` does
+  `cd /d "%~dp0"` before invoking the script, but the script itself is
+  also free-standing — `$PSScriptRoot` always points to its own folder
+  whether invoked via the .cmd wrapper or directly via `powershell -File`.
+* **Why .zip not .ppkg.** `.ppkg` is a WIM archive (`MSWIM` magic) with
+  an undocumented multi-XML compiled structure including per-setting
+  SettingsGroup GUIDs. Hand-built .ppkg files (any container) fail with
+  "Enter the package password" because Windows' provisioning runtime
+  treats unparseable contents as encrypted. icd.exe is the only known
+  generator. See `windows_mdm/package.py` docstring for the autopsy.
+* **Firefox uses its own cert store** (not `LocalMachine\Root`). HTTPS
+  interception breaks the moment the kid switches browsers. Documented
+  in [docs/setup-windows-mdm.md](../../docs/setup-windows-mdm.md);
+  parent's responsibility to either pin Edge/Chrome or flip Firefox's
+  `security.enterprise_roots.enabled` via a policies.json.
 
 ## Adding a new page
 

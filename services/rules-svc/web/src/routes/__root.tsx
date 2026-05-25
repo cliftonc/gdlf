@@ -6,6 +6,10 @@ import { api, ApiError } from "../lib/api";
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
     if (location.pathname.startsWith("/login")) return;
+    // Shortlink enrolment pages authenticate per-request via `?dl=<code>`;
+    // they intentionally work without a parent session, so don't bounce to
+    // /login if the user happens to be unauthenticated.
+    if (location.pathname.startsWith("/dl/")) return;
     try {
       await api("/api/auth/me");
     } catch (e) {
@@ -21,10 +25,18 @@ export const Route = createRootRoute({
 function RootLayout() {
   const path = useRouterState({ select: (s) => s.location.pathname });
   const onLogin = path.startsWith("/login");
+  // Shortlink pages are shown to the kid on the device being enrolled. Drop
+  // the parent nav (Kids / Activity / Settings / Logout) so they don't see
+  // it (and don't get 401-redirected by clicking on it).
+  const minimal = path.startsWith("/dl/");
   return (
     <Providers>
       {onLogin ? (
         <main className="min-h-screen flex items-center justify-center p-4 safe-pt safe-pb">
+          <Outlet />
+        </main>
+      ) : minimal ? (
+        <main className="min-h-screen w-full px-4 sm:px-6 lg:px-8 py-6 safe-pt safe-pb">
           <Outlet />
         </main>
       ) : (

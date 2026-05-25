@@ -14,6 +14,31 @@ else
   exit 1
 fi
 
+# Containers that attach to wg's network namespace via `network_mode: service:wg`.
+# If wg restarts/recreates, these are orphaned (running but with a dead NS) and
+# `docker restart` cannot rejoin — they must be recreated. See CLAUDE.md.
+WG_DEPENDENTS="mitmproxy nftables blockpage adguard"
+
+sync_wg_dependents() {
+  # If wg started more recently than any dependent, recreate that dependent.
+  # No-op when wg wasn't touched (timestamps unchanged) or wg isn't running.
+  local wg_started dep_started d need=()
+  wg_started=$(docker inspect -f '{{.State.StartedAt}}' gdlf-wg 2>/dev/null) || return 0
+  [[ -z "$wg_started" ]] && return 0
+  for d in $WG_DEPENDENTS; do
+    dep_started=$(docker inspect -f '{{.State.StartedAt}}' "gdlf-$d" 2>/dev/null) || continue
+    [[ -z "$dep_started" ]] && continue
+    # ISO-8601 timestamps compare correctly as strings.
+    if [[ "$wg_started" > "$dep_started" ]]; then
+      need+=("$d")
+    fi
+  done
+  if (( ${#need[@]} > 0 )); then
+    echo "wg restarted after ${need[*]} — recreating to reattach netns"
+    $COMPOSE up -d --force-recreate --no-deps "${need[@]}"
+  fi
+}
+
 if [[ ! -f .env ]]; then
   if [[ -f .env.example ]]; then
     echo "No .env found. Copying .env.example -> .env. Edit it before continuing."
@@ -46,11 +71,13 @@ case "$cmd" in
     mkdir -p config/state config/nft-state
     echo "running ./scripts/gen-ca.sh (mitmproxy CA)..."
     ./scripts/gen-ca.sh
+    echo "running ./scripts/init-adguard.sh (skip wizard, seed admin)..."
+    ./scripts/init-adguard.sh
     echo "init done. Now: ./gdlf up"
     ;;
-  up)        $COMPOSE up -d "$@" ;;
+  up)        $COMPOSE up -d "$@"; sync_wg_dependents ;;
   down)      $COMPOSE down "$@" ;;
-  restart)   $COMPOSE restart "$@" ;;
+  restart)   $COMPOSE restart "$@"; sync_wg_dependents ;;
   logs)      $COMPOSE logs -f --tail=200 "$@" ;;
   ps)        $COMPOSE ps ;;
   shell)
@@ -60,6 +87,7 @@ case "$cmd" in
   rebuild)
     $COMPOSE build --no-cache "$@"
     $COMPOSE up -d "$@"
+    sync_wg_dependents
     ;;
   web-dev)
     # Run the Vite dev server with HMR; API calls proxy to the rules-svc
@@ -407,6 +435,100 @@ EOF
         ;;
     esac
     ;;
+  windows)
+    # Manage the artifacts needed to build Windows enrolment .ppkg files.
+    # Unlike Apple/Android there's no live channel: enrolment is a one-shot
+    # signed Provisioning Package the parent applies as Admin on the kid's
+    # PC. See docs/setup-windows-mdm.md for the full walk-through.
+    sub="${1:-help}"; shift || true
+    WIN_DIR="config/state/windows"
+    WG_MSI="$WIN_DIR/wireguard.msi"
+    # Pinned version + sha256 of the official WireGuard for Windows installer.
+    # Updating these values is the only thing required to bump the bundled
+    # version across all future Windows .ppkgs. Source of truth:
+    # https://download.wireguard.com/windows-client/
+    WG_MSI_VERSION="1.1"
+    WG_MSI_URL="https://download.wireguard.com/windows-client/wireguard-amd64-${WG_MSI_VERSION}.msi"
+    WG_MSI_SHA256="6daa5d37a9e2950dfb8c48b95ab8e562cb2bad1c785d020f38f97bea4c6a5566"
+
+    case "$sub" in
+      init)
+        mkdir -p "$WIN_DIR"
+        chmod 700 "$WIN_DIR"
+        # Confirm the MDM CA is in place — Windows .ppkg signing chains to it.
+        if [[ ! -f config/state/mdm-ca/ca.pem ]]; then
+          cat >&2 <<EOF
+gdlf MDM CA missing — run \`./gdlf mdm-ca init\` first. The same CA that
+signs Apple device identity certs also Authenticode-signs Windows
+provisioning packages.
+EOF
+          exit 1
+        fi
+        if [[ -f "$WG_MSI" ]]; then
+          echo "ok    $WG_MSI ($(stat -f%z "$WG_MSI" 2>/dev/null || stat -c%s "$WG_MSI") bytes)"
+        else
+          cat <<EOF
+WireGuard for Windows MSI not yet downloaded. To bundle it into per-kid
+.ppkgs, fetch it once from the upstream and verify its sha256:
+
+  curl -fLo "$WG_MSI" \\
+    "$WG_MSI_URL"
+  echo "$WG_MSI_SHA256  $WG_MSI" | sha256sum -c -
+
+(The sha256 baked into this script may lag a release behind upstream — if
+the check fails, verify the file against
+https://download.wireguard.com/windows-client/ first, then update the
+WG_MSI_SHA256 constant near the top of this case branch.)
+EOF
+        fi
+        echo
+        echo "windows-mdm artifacts in $WIN_DIR:"
+        if [[ -f "$WG_MSI" ]]; then echo "  ok    $WG_MSI"; else echo "  miss  $WG_MSI"; fi
+        ;;
+      status)
+        echo "windows-mdm artifacts in $WIN_DIR:"
+        if [[ -f "$WG_MSI" ]]; then
+          msi_size=$(stat -f%z "$WG_MSI" 2>/dev/null || stat -c%s "$WG_MSI")
+          echo "  ok    $WG_MSI ($msi_size bytes)"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "$WG_MSI" | awk '{print $1}')
+            if [[ "$actual" == "$WG_MSI_SHA256" ]]; then
+              echo "        sha256 ok (pinned $WG_MSI_VERSION)"
+            else
+              echo "        sha256 MISMATCH (have $actual; pinned $WG_MSI_SHA256)" >&2
+            fi
+          fi
+        else
+          echo "  miss  $WG_MSI"
+        fi
+        if [[ -f config/state/mdm-ca/ca.pem ]]; then
+          echo "  ok    config/state/mdm-ca/ca.pem (used for .ppkg signing)"
+        else
+          echo "  miss  config/state/mdm-ca/ca.pem"
+        fi
+        ;;
+      help|-h|--help|"")
+        cat <<EOF
+gdlf windows — manage Windows enrolment package artifacts.
+
+  ./gdlf windows init     print the WG MSI download instructions; verifies
+                          the MDM CA is in place. One-time setup.
+  ./gdlf windows status   show MSI presence + sha256 + MDM CA presence.
+
+Per-device enrolment happens from the dashboard: open a device's MDM dialog
+-> "Generate Windows enrolment package". The .ppkg is downloaded by the
+parent and applied as Administrator on the kid's PC.
+
+See docs/setup-windows-mdm.md for the end-to-end walk-through.
+EOF
+        ;;
+      *)
+        echo "unknown windows subcommand: $sub" >&2
+        echo "try: ./gdlf windows help" >&2
+        exit 2
+        ;;
+    esac
+    ;;
   mdm-ca)
     # The gdlf MDM CA signs per-device identity certs that authenticate
     # devices to the MDM server over mTLS. Separate from the mitmproxy CA
@@ -485,6 +607,7 @@ gdlf — usage:
   ./gdlf apns ...           manage the Apple APNs MDM Push Certificate
   ./gdlf mdm-ca ...         manage the gdlf MDM signing CA (device identity certs)
   ./gdlf amapi ...          manage the Android Management API integration
+  ./gdlf windows ...        manage Windows enrolment .ppkg artifacts
 
 Dashboard: http://localhost:\${DASHBOARD_PORT:-8080}
 EOF

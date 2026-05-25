@@ -37,6 +37,43 @@ def registrable_domain(host: str) -> str:
 router = APIRouter(prefix="/api/tls-failures", tags=["tls-failures"])
 
 
+def _group_patterns(registrable: str) -> tuple[str, str]:
+    """The two fnmatch globs that cover a registrable domain — the apex itself
+    and any subdomain. Mirrors `groupPatterns` in the SPA so on/off semantics
+    stay in sync between server-side auto-enable and the toggle endpoint."""
+    return (registrable, f"*.{registrable}")
+
+
+def _auto_enable_passthrough(kid_name: str, registrable: str) -> None:
+    """If `registrable` isn't on the kid's opt-out list, ensure both group
+    patterns are present in their `mitm_passthrough_hosts`. Idempotent —
+    only writes the YAML when something actually changes."""
+    if not registrable:
+        return
+    cfg = store.load()
+    kid = cfg.kid(kid_name)
+    if not kid:
+        return
+    if registrable in kid.mitm_passthrough_disabled:
+        return
+    apex, wild = _group_patterns(registrable)
+    have = set(kid.mitm_passthrough_hosts)
+    if apex in have and wild in have:
+        return
+
+    def _add(c):
+        k = c.kid(kid_name)
+        if not k:
+            return
+        if registrable in k.mitm_passthrough_disabled:
+            return
+        merged = set(k.mitm_passthrough_hosts)
+        merged.update(_group_patterns(registrable))
+        k.mitm_passthrough_hosts = sorted(merged)
+
+    store.mutate(_add)
+
+
 class IngestBody(BaseModel):
     client_ip: str
     host: str
@@ -45,7 +82,9 @@ class IngestBody(BaseModel):
 @router.post("")
 def ingest(body: IngestBody) -> dict:
     """mitmproxy addon → here. Resolves the client IP to a kid/device via
-    kids.yaml, then bumps the row in `tls_failures`."""
+    kids.yaml, bumps the row in `tls_failures`, and (unless the parent has
+    opted the registrable out) auto-adds the apex + wildcard to the kid's
+    passthrough list so the next handshake just works."""
     host = (body.host or "").strip().lower()
     client_ip = (body.client_ip or "").strip()
     if not host or not client_ip:
@@ -54,13 +93,16 @@ def ingest(body: IngestBody) -> dict:
     found = cfg.device_by_ip(client_ip)
     kid_name = found[0].name if found else None
     device_name = found[1].name if found else None
+    reg = registrable_domain(host)
     db.upsert_tls_failure(
         kid=kid_name,
         device=device_name,
         client_ip=client_ip,
         host=host,
-        registrable=registrable_domain(host),
+        registrable=reg,
     )
+    if kid_name:
+        _auto_enable_passthrough(kid_name, reg)
     return {"ok": True}
 
 
@@ -68,9 +110,13 @@ def ingest(body: IngestBody) -> dict:
 def list_failures(kid: str | None = None) -> dict:
     """Grouped failures for the Passthrough tab.
 
+    Backfills auto-passthrough for any observed registrable not on the kid's
+    opt-out list — covers failures that pre-date the default-on behaviour so
+    the parent doesn't have to wait for the next retry to see things working.
+
     Response shape:
       {"groups": [
-        {"registrable": "reddit.com",
+        {"registrable": "reddit.com", "enabled": true,
          "ts_last": "...", "count": 17, "kid": "Clifton",
          "children": [{"id": 12, "host": "gql-fed.reddit.com",
                        "count": 9, "ts_first": "...", "ts_last": "...",
@@ -78,14 +124,32 @@ def list_failures(kid: str | None = None) -> dict:
         }, ...]}
     """
     rows = db.list_tls_failures(kid=kid)
+
+    # Gather (kid, registrable) pairs and backfill any missing auto-passthrough
+    # in a single mutate. Cheap when nothing's missing — we compare set-by-set
+    # before deciding to write.
+    observed: dict[str, set[str]] = {}
+    for r in rows:
+        if r.kid and r.registrable:
+            observed.setdefault(r.kid, set()).add(r.registrable)
+    if observed:
+        _backfill_auto_passthrough(observed)
+
+    cfg = store.load()
+    disabled_by_kid: dict[str, set[str]] = {
+        k.name: set(k.mitm_passthrough_disabled) for k in cfg.kids
+    }
+
     grouped: dict[tuple[str | None, str], dict] = {}
     for r in rows:
         key = (r.kid, r.registrable)
         g = grouped.get(key)
         if g is None:
+            enabled = not (r.kid and r.registrable in disabled_by_kid.get(r.kid, set()))
             g = {
                 "registrable": r.registrable,
                 "kid": r.kid,
+                "enabled": enabled,
                 "count": 0,
                 "ts_last": None,
                 "children": [],
@@ -103,15 +167,60 @@ def list_failures(kid: str | None = None) -> dict:
             "ts_first": r.ts_first.isoformat() if r.ts_first else None,
             "ts_last": r.ts_last.isoformat() if r.ts_last else None,
         })
-    # Stringify the group ts_last for JSON, sort children newest-first,
-    # sort groups by most recent activity.
     out = []
     for g in grouped.values():
-        g["children"].sort(key=lambda c: c["ts_last"] or "", reverse=True)
+        g["children"].sort(key=lambda c: c["host"])
         g["ts_last"] = g["ts_last"].isoformat() if g["ts_last"] else None
         out.append(g)
-    out.sort(key=lambda g: g["ts_last"] or "", reverse=True)
+    # Server-side sort is alphabetical by registrable; the SPA may re-sort
+    # but defaulting here keeps non-SPA consumers tidy too.
+    out.sort(key=lambda g: g["registrable"] or "")
     return {"groups": out}
+
+
+def _backfill_auto_passthrough(observed: dict[str, set[str]]) -> None:
+    """For every (kid, registrable) seen, ensure the apex + wildcard are in
+    the kid's passthrough list — unless the parent explicitly disabled it.
+    No-op when nothing's missing, so safe to call from every list request."""
+    cfg = store.load()
+    pending: dict[str, set[str]] = {}
+    for kname, regs in observed.items():
+        k = cfg.kid(kname)
+        if not k:
+            continue
+        disabled = set(k.mitm_passthrough_disabled)
+        have = set(k.mitm_passthrough_hosts)
+        add: set[str] = set()
+        for reg in regs:
+            if reg in disabled:
+                continue
+            apex, wild = _group_patterns(reg)
+            if apex not in have:
+                add.add(apex)
+            if wild not in have:
+                add.add(wild)
+        if add:
+            pending[kname] = add
+    if not pending:
+        return
+
+    def _apply(c):
+        for kname, add in pending.items():
+            k = c.kid(kname)
+            if not k:
+                continue
+            disabled = set(k.mitm_passthrough_disabled)
+            merged = set(k.mitm_passthrough_hosts)
+            for pat in add:
+                # Re-check disabled in case the parent toggled off between
+                # the snapshot and the mutation.
+                reg = pat[2:] if pat.startswith("*.") else pat
+                if reg in disabled:
+                    continue
+                merged.add(pat)
+            k.mitm_passthrough_hosts = sorted(merged)
+
+    store.mutate(_apply)
 
 
 @router.delete("/{failure_id}", status_code=204)

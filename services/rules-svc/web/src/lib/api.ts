@@ -51,3 +51,11 @@ export async function api<T = unknown>(path: string, opts: FetchOpts = {}): Prom
   }
   return body as T;
 }
+
+/** Append `?dl=<code>` to a path so an unauthenticated request gets accepted
+ *  by the shortlink auth bypass on device-scoped endpoints. No-op when code
+ *  is empty (regular cookie-authenticated path). */
+export function withDl(path: string, dlCode?: string | null): string {
+  if (!dlCode) return path;
+  return path + (path.includes("?") ? "&" : "?") + "dl=" + encodeURIComponent(dlCode);
+}

@@ -6,6 +6,24 @@
 html, body, #root { height: 100%; }
 body { -webkit-tap-highlight-color: transparent; }
 
+/* HeroUI manages its own focus indicator via `data-focus-visible` rings on
+   the component wrappers. Without this, the browser's default thick blue
+   outline paints on top of the bare <input>/<button>/<a>/<select>, giving
+   a stacked double-ring (one HeroUI ring around the wrapper, one browser
+   ring around the inner control). Suppress the inner one — keyboard a11y
+   is preserved via the wrapper's ring. */
+@layer base {
+  input:focus, input:focus-visible,
+  select:focus, select:focus-visible,
+  textarea:focus, textarea:focus-visible,
+  button:focus, button:focus-visible,
+  a:focus, a:focus-visible,
+  [role="button"]:focus, [role="button"]:focus-visible,
+  [role="combobox"]:focus, [role="combobox"]:focus-visible {
+    outline: none;
+  }
+}
+
 /* Respect notch on devices with safe-area insets. */
 .safe-pt { padding-top: env(safe-area-inset-top); }
 .safe-pb { padding-bottom: env(safe-area-inset-bottom); }

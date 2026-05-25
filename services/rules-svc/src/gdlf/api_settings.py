@@ -27,6 +27,9 @@ def get_settings() -> dict:
         "tz": settings.tz,
         "wg_host": settings.wg_host,
         "wg_port": settings.wg_port,
+        "adguard_ui_port": settings.adguard_ui_port,
+        "adguard_admin_user": "admin",
+        "adguard_admin_password": settings.adguard_admin_password,
         "db_stats": {
             "events": s["events"],
             "oldest": s["oldest"].isoformat() if s["oldest"] else None,
@@ -39,9 +42,14 @@ def get_settings() -> dict:
 
 @router.post("/prune")
 def prune_now() -> dict:
-    res = db.prune(settings.retention_days, settings.max_events)
+    res = db.prune(
+        settings.retention_days,
+        settings.max_events,
+        stats_retention_days=settings.stats_retention_days,
+    )
     db.vacuum()
     return {
         "age_deleted": res["age_deleted"],
         "cap_deleted": res["cap_deleted"],
+        "stats_deleted": res.get("stats_deleted", 0),
     }

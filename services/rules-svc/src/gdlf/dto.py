@@ -28,6 +28,7 @@ def device_dto(d: Device, handshake: dict | None = None) -> dict[str, Any]:
         "online": _is_online(last),
         "mdm": mdm_state_dto(d.mdm) if d.mdm else None,
         "android_mdm": android_mdm_state_dto(d.android_mdm) if d.android_mdm else None,
+        "windows_mdm": windows_mdm_state_dto(d.windows_mdm) if d.windows_mdm else None,
     }
 
 
@@ -51,6 +52,17 @@ def android_mdm_state_dto(s) -> dict[str, Any]:
         "last_status_at": s.last_status_at.isoformat() if s.last_status_at else None,
         "applied_policy_version": s.applied_policy_version,
         "device_name": s.device_name,
+    }
+
+
+def windows_mdm_state_dto(s) -> dict[str, Any]:
+    """Projection of WindowsMdmState for the dashboard."""
+    return {
+        "status": s.status,
+        "package_id": s.package_id,
+        "package_version": s.package_version,
+        "enrolled_at": s.enrolled_at.isoformat() if s.enrolled_at else None,
+        "last_built_at": s.last_built_at.isoformat() if s.last_built_at else None,
     }
 
 
@@ -86,6 +98,18 @@ def kid_summary_dto(k: Kid, handshakes: dict[str, dict]) -> dict[str, Any]:
         "device_count": len(devices),
         "online_device_count": sum(1 for d in devices if d["online"]),
         "rule_count": len(k.url_rules),
+        # Thin device list for the overview card's per-device block toggles.
+        # Full device records (handshake/keys/MDM state) stay on the detail DTO.
+        "devices": [
+            {
+                "name": d["name"],
+                "platform": d["platform"],
+                "wg_ip": d["wg_ip"],
+                "online": d["online"],
+                "manual_block": d["manual_block"],
+            }
+            for d in devices
+        ],
     }
 
 
@@ -102,6 +126,7 @@ def kid_detail_dto(k: Kid, handshakes: dict[str, dict]) -> dict[str, Any]:
         "blocked_apps": list(k.blocked_apps),
         "keyword_flags": list(k.keyword_flags),
         "mitm_passthrough_hosts": list(k.mitm_passthrough_hosts),
+        "mitm_passthrough_disabled": list(k.mitm_passthrough_disabled),
         "devices": [device_dto(d, handshakes.get(d.wg_ip)) for d in k.devices],
         "rules": [rule_dto(r) for r in k.url_rules],
     }

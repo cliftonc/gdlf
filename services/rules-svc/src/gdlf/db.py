@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import UniqueConstraint, text
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from .settings import settings
@@ -36,6 +36,28 @@ class Event(SQLModel, table=True):
     #   xhr   (Sec-Fetch-Dest=empty) — fetch/XHR, often analytics beacons
     #   unknown — addon couldn't classify (SNI-only event)
     kind: str | None = Field(default=None, index=True)
+
+
+class DomainStat(SQLModel, table=True):
+    """Per-(kid, host, 5-min bucket) rollup of request counts.
+
+    Populated by `aggregates.flush()` every ~30s from an in-memory accumulator
+    fed by `/api/events`. Counters cover every request the addon sees — pages,
+    sub-resources, XHRs, WebSockets — so the dashboard can show a true
+    "what is each kid hitting right now" view without keeping a row per
+    request in the events table.
+
+    The raw `events` table only carries page navigations + blocks/flags now;
+    counters here are the volume signal.
+    """
+    __tablename__ = "domain_stats"
+    kid: str = Field(primary_key=True, index=True)
+    host: str = Field(primary_key=True)
+    bucket_ts: datetime = Field(primary_key=True, index=True)
+    requests: int = 0       # all kinds (page + iframe + asset + xhr + ws)
+    pages: int = 0          # kind in {page, iframe}
+    blocked: int = 0        # decision in {block, flag}
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Handshake(SQLModel, table=True):
@@ -123,6 +145,44 @@ class MdmCommandResponse(SQLModel, table=True):
     ts: datetime = Field(default_factory=datetime.utcnow)
     status: str                                      # Acknowledged|Error|NotNow|CommandFormatError
     response_plist: str | None = None                # full response body, for debugging
+
+
+class DeviceShortlink(SQLModel, table=True):
+    """Short, parent-shareable code that authenticates a single device's
+    enrolment page without a cookie session.
+
+    The code is the auth token for the (wg_ip) it owns: presented as
+    `?dl=<code>` on the existing `/api/devices/{ip}/...` and
+    `/api/kids/{name}/devices/{ip}/...` endpoints, the auth middleware
+    accepts it iff the path's `{ip}` matches `wg_ip`. The SPA route
+    `/dl/{code}` resolves to that device's enrolment page.
+    """
+    __tablename__ = "device_shortlinks"
+    code: str = Field(primary_key=True)            # 4-char base32, uppercase
+    wg_ip: str = Field(index=True, unique=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class WindowsEnrollToken(SQLModel, table=True):
+    """One-time token tying a Windows provisioning package download to a
+    specific device.
+
+    The token + per-device .ppkg blob is built at mint time and cached
+    on-disk under <state_dir>/windows/packages/<token>.ppkg. First fetch
+    marks `used`; the file is unlinked at the same time so the blob can't
+    be re-downloaded. Re-enrolling means a fresh token (and a fresh GUID-
+    versioned package).
+    """
+    __tablename__ = "windows_enroll_tokens"
+    token: str = Field(primary_key=True)
+    wg_ip: str = Field(index=True)
+    package_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime
+    used_at: datetime | None = None
+    # Set when the package is a revocation (uninstall) variant instead of
+    # an enrollment one — same on-disk shape, different customizations.xml.
+    revoke: bool = False
 
 
 _engine = None
@@ -228,6 +288,44 @@ def delete_tls_failure(failure_id: int) -> bool:
         return True
 
 
+def upsert_domain_stats(rows: list[dict]) -> None:
+    """Bulk UPSERT counter rows from the in-memory accumulator.
+
+    Each row must contain: kid, host, bucket_ts (datetime), requests, pages,
+    blocked, last_seen (datetime). Uses SQLite's ON CONFLICT to add deltas
+    onto an existing bucket. All rows go through in a single transaction so
+    a 30s batch of (kid, host) updates costs one fsync.
+    """
+    if not rows:
+        return
+    sql = text(
+        "INSERT INTO domain_stats "
+        "(kid, host, bucket_ts, requests, pages, blocked, last_seen) "
+        "VALUES (:kid, :host, :bucket_ts, :requests, :pages, :blocked, :last_seen) "
+        "ON CONFLICT(kid, host, bucket_ts) DO UPDATE SET "
+        "  requests = requests + excluded.requests, "
+        "  pages    = pages    + excluded.pages, "
+        "  blocked  = blocked  + excluded.blocked, "
+        "  last_seen = MAX(last_seen, excluded.last_seen)"
+    )
+    with session() as s:
+        s.connection().execute(sql, rows)
+        s.commit()
+
+
+def domain_stats_window(
+    since: datetime,
+    *,
+    kid: str | None = None,
+) -> list[DomainStat]:
+    """Return raw bucket rows newer than `since`, optionally scoped to one kid."""
+    with session() as s:
+        stmt = select(DomainStat).where(DomainStat.bucket_ts >= since)
+        if kid is not None:
+            stmt = stmt.where(DomainStat.kid == kid)
+        return list(s.exec(stmt).all())
+
+
 def stats() -> dict:
     """Return event-table size info for the Settings page."""
     from sqlmodel import func
@@ -245,7 +343,7 @@ def stats() -> dict:
     }
 
 
-def prune(retention_days: int, max_events: int) -> dict:
+def prune(retention_days: int, max_events: int, stats_retention_days: int | None = None) -> dict:
     """Delete events older than retention_days, then trim to max_events.
 
     Returns counts so the caller can log them. SQLite WAL serialises writes,
@@ -257,6 +355,7 @@ def prune(retention_days: int, max_events: int) -> dict:
     age_deleted = 0
     cap_deleted = 0
     tls_deleted = 0
+    stats_deleted = 0
     with session() as s:
         res = s.exec(delete(Event).where(Event.ts < cutoff))
         age_deleted = res.rowcount or 0
@@ -277,10 +376,18 @@ def prune(retention_days: int, max_events: int) -> dict:
         res = s.exec(delete(TlsFailure).where(TlsFailure.ts_last < cutoff))
         tls_deleted = res.rowcount or 0
         s.commit()
+        # Counter buckets get their own retention knob; default to `retention_days`
+        # when not supplied so behaviour is unchanged for callers that don't pass it.
+        days = stats_retention_days if stats_retention_days is not None else retention_days
+        stats_cutoff = datetime.utcnow() - timedelta(days=days)
+        res = s.exec(delete(DomainStat).where(DomainStat.bucket_ts < stats_cutoff))
+        stats_deleted = res.rowcount or 0
+        s.commit()
     return {
         "age_deleted": age_deleted,
         "cap_deleted": cap_deleted,
         "tls_deleted": tls_deleted,
+        "stats_deleted": stats_deleted,
     }
 
 

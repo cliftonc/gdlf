@@ -41,6 +41,11 @@ class PassthroughAddBody(BaseModel):
     host: str
 
 
+class PassthroughGroupBody(BaseModel):
+    registrable: str
+    enabled: bool
+
+
 class BlockedAppsBody(BaseModel):
     blocked_apps: list[str]
 
@@ -186,6 +191,50 @@ def add_passthrough(name: str, body: PassthroughAddBody) -> dict:
     store.mutate(upd)
     cfg = store.load(force=True)
     return {"mitm_passthrough_hosts": list(cfg.kid(name).mitm_passthrough_hosts)}
+
+
+@router.put("/{name}/passthrough-group")
+def toggle_passthrough_group(name: str, body: PassthroughGroupBody) -> dict:
+    """Flip a registrable domain on/off as one unit.
+
+    On: ensure `reg` + `*.reg` are in `mitm_passthrough_hosts`, drop `reg`
+    from `mitm_passthrough_disabled`.
+    Off: remove `reg` + `*.reg` from `mitm_passthrough_hosts`, add `reg` to
+    `mitm_passthrough_disabled` so the next TLS retry from the device doesn't
+    auto-re-enable it.
+    """
+    reg = body.registrable.strip().lower()
+    if not reg:
+        raise HTTPException(400, "registrable required")
+    patterns = {reg, f"*.{reg}"}
+
+    def upd(cfg):
+        kid = cfg.kid(name)
+        if not kid:
+            raise HTTPException(404, "unknown kid")
+        if body.enabled:
+            merged = set(kid.mitm_passthrough_hosts) | patterns
+            kid.mitm_passthrough_hosts = sorted(merged)
+            kid.mitm_passthrough_disabled = sorted(
+                {d for d in kid.mitm_passthrough_disabled if d != reg}
+            )
+        else:
+            kid.mitm_passthrough_hosts = sorted(
+                {h for h in kid.mitm_passthrough_hosts if h not in patterns}
+            )
+            kid.mitm_passthrough_disabled = sorted(
+                set(kid.mitm_passthrough_disabled) | {reg}
+            )
+
+    store.mutate(upd)
+    cfg = store.load(force=True)
+    kid = cfg.kid(name)
+    return {
+        "registrable": reg,
+        "enabled": body.enabled,
+        "mitm_passthrough_hosts": list(kid.mitm_passthrough_hosts),
+        "mitm_passthrough_disabled": list(kid.mitm_passthrough_disabled),
+    }
 
 
 @router.delete("/{name}/passthrough/{host}")

@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from . import store, wg
+from . import api_shortlinks, db, store, wg
 from .dto import device_dto
 from .schema import Device, Platform
 from .settings import settings
@@ -68,6 +68,14 @@ def create_device(name: str, body: CreateDeviceBody) -> dict:
 
     wg.write_wg0_conf(store.load(force=True))
     wg.reload_wg()
+
+    # Auto-provision an enrolment shortlink so the parent can hand-off the
+    # /dl/<code> URL straight from the "device created" toast — no separate
+    # rotate step. Don't fail device creation if shortlink minting trips.
+    try:
+        api_shortlinks.mint_shortlink(ip)
+    except Exception:
+        pass
 
     cfg = store.load(force=True)
     _, device = cfg.device_by_ip(ip)
@@ -139,6 +147,18 @@ def device_delete(ip: str):
         p = settings.state_dir / "wg-keys" / f"{peer_id}.{ext}"
         if p.exists():
             p.unlink()
+    # Drop the device's shortlink row so the code can't outlive the device.
+    try:
+        from sqlmodel import select as _select
+        with db.session() as s:
+            row = s.exec(
+                _select(db.DeviceShortlink).where(db.DeviceShortlink.wg_ip == ip)
+            ).first()
+            if row:
+                s.delete(row)
+                s.commit()
+    except Exception:
+        pass
     wg.write_wg0_conf(store.load(force=True))
     wg.reload_wg()
     return None

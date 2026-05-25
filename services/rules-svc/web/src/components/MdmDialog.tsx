@@ -22,6 +22,10 @@ import {
   useMdmEnrollToken,
   useMdmInstallPolicy,
   useMdmPush,
+  useWindowsMdmEnrollPackage,
+  useWindowsMdmMarkEnrolled,
+  useWindowsMdmRevoke,
+  type WindowsPackageResponse,
 } from "../lib/mutations";
 
 function formatAgo(iso: string | null): string {
@@ -45,7 +49,8 @@ function statusColor(s: string): "success" | "warning" | "danger" | "default" {
     s === "CommandFormatError" ||
     s === "checked_out" ||
     s === "disabled" ||
-    s === "deleted"
+    s === "deleted" ||
+    s === "revoked"
   )
     return "danger";
   return "default";
@@ -63,8 +68,12 @@ export function MdmDialog({
   onClose: () => void;
 }) {
   const isAndroid = device.platform === "android";
+  const isWindows = device.platform === "windows";
   const enrolled = device.mdm?.status === "enrolled";
-  const commands = useMdmCommands(device.wg_ip, isOpen && enrolled && !isAndroid);
+  const commands = useMdmCommands(
+    device.wg_ip,
+    isOpen && enrolled && !isAndroid && !isWindows,
+  );
   const enrollToken = useMdmEnrollToken(kidName);
   const installPolicy = useMdmInstallPolicy(kidName);
   const push = useMdmPush(kidName);
@@ -76,9 +85,17 @@ export function MdmDialog({
   const aSyncStatus = useAndroidMdmSyncStatus(kidName);
   const aUnenroll = useAndroidMdmUnenroll(kidName);
 
+  // Windows .zip mutations.
+  const wBuild = useWindowsMdmEnrollPackage(kidName);
+  const wMark = useWindowsMdmMarkEnrolled(kidName);
+  const wRevoke = useWindowsMdmRevoke(kidName);
+
   const [enrollUrl, setEnrollUrl] = useState<string | null>(null);
   // QR PNG URL cache-busted on regenerate so the <img> reloads.
   const [aQrUrl, setAQrUrl] = useState<string | null>(null);
+  // Most recent .zip download response — kept locally so the parent can
+  // copy the link / re-download until the modal closes.
+  const [wPackage, setWPackage] = useState<WindowsPackageResponse | null>(null);
 
   const onGenerateUrl = async () => {
     const r = await enrollToken.mutateAsync(device.wg_ip);
@@ -90,6 +107,11 @@ export function MdmDialog({
     setAQrUrl(`${r.qr_url}?t=${Date.now()}`);
   };
 
+  const onBuildWindowsPackage = async (revoke: boolean) => {
+    const r = await (revoke ? wRevoke : wBuild).mutateAsync(device.wg_ip);
+    setWPackage(r);
+  };
+
   return (
     <Modal
       isOpen={isOpen}
@@ -97,6 +119,7 @@ export function MdmDialog({
         if (!open) {
           setEnrollUrl(null);
           setAQrUrl(null);
+          setWPackage(null);
           onClose();
         }
       }}
@@ -126,6 +149,17 @@ export function MdmDialog({
                 syncingStatus={aSyncStatus.isPending}
                 onUnenroll={() => aUnenroll.mutate(device.wg_ip)}
                 unenrolling={aUnenroll.isPending}
+              />
+            ) : isWindows ? (
+              <WindowsMdmBody
+                device={device}
+                pkg={wPackage}
+                onBuild={() => onBuildWindowsPackage(false)}
+                building={wBuild.isPending}
+                onRevoke={() => onBuildWindowsPackage(true)}
+                revoking={wRevoke.isPending}
+                onMarkApplied={() => wMark.mutate(device.wg_ip)}
+                marking={wMark.isPending}
               />
             ) : (
               <>
@@ -468,6 +502,229 @@ function AndroidMdmBody({
           <summary className="cursor-pointer">AMAPI resource names</summary>
           <div className="mt-1 font-mono break-all">
             <div>device: {state.device_name}</div>
+          </div>
+        </details>
+      )}
+    </>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Windows body. The only platform without a live channel — we hand the parent
+// a one-shot .zip they extract and run on the kid's PC as Administrator
+// (Install.cmd → UAC). After that, "Mark applied" is parent-attested
+// confirmation. Revoking issues a matching uninstall .zip.
+
+function WindowsMdmBody({
+  device,
+  pkg,
+  onBuild,
+  building,
+  onRevoke,
+  revoking,
+  onMarkApplied,
+  marking,
+}: {
+  device: Device;
+  pkg: WindowsPackageResponse | null;
+  onBuild: () => void;
+  building: boolean;
+  onRevoke: () => void;
+  revoking: boolean;
+  onMarkApplied: () => void;
+  marking: boolean;
+}) {
+  const state = device.windows_mdm;
+  const enrolled = state?.status === "enrolled";
+  const pendingApply = !!state && state.status === "pending";
+  const pendingRevoke = !!state && state.status === "revoked";
+
+  return (
+    <>
+      <div className="flex items-center gap-2 flex-wrap">
+        {state ? (
+          <>
+            <Chip size="sm" color={statusColor(state.status)} variant="flat">
+              {state.status}
+            </Chip>
+            <Chip size="sm" variant="flat">
+              v{state.package_version}
+            </Chip>
+            <span className="text-xs text-default-500">
+              built {formatAgo(state.last_built_at)}
+              {state.enrolled_at && ` · applied ${formatAgo(state.enrolled_at)}`}
+            </span>
+          </>
+        ) : (
+          <Chip size="sm" variant="flat">
+            not enrolled
+          </Chip>
+        )}
+      </div>
+
+      <div className="text-xs text-default-500 bg-content2/40 border border-default-200 rounded-medium p-3">
+        Windows has no live MDM channel — we hand the parent a one-shot
+        .zip with a self-elevating <code>Install.cmd</code> inside. The
+        parent applies it as <strong>Administrator</strong>; the kid must
+        run as a <strong>Standard User</strong> for the containment (WG
+        service ACL + locked tray UI) to bite. See <code>docs/setup-windows-mdm.md</code>.
+      </div>
+
+      {!enrolled && !pendingRevoke && (
+        <div className="border border-default-200 rounded-medium p-3 bg-content2/40">
+          <p className="text-sm font-medium mb-2">
+            Build the enrolment bundle
+          </p>
+          <ol className="list-decimal pl-5 text-sm space-y-1 mb-3 text-default-700">
+            <li>
+              Make sure the kid's PC account is a <strong>Standard user</strong> and
+              the parent's account is the local Administrator.
+            </li>
+            <li>Click <em>Build .zip</em>; download the file.</li>
+            <li>
+              Copy it to the kid's PC (USB, OneDrive, share). Sign in there
+              as the parent / Administrator, extract the zip, and
+              <strong> right-click Install.cmd → Run as administrator</strong>
+              (or double-click and click Yes at the UAC prompt).
+            </li>
+            <li>
+              Come back here and click <em>Mark applied</em> once the WireGuard
+              tray icon is up on the device.
+            </li>
+          </ol>
+
+          {pkg ? (
+            <div className="flex flex-col gap-2">
+              <Snippet
+                size="sm"
+                symbol=""
+                classNames={{ pre: "whitespace-pre-wrap break-all" }}
+              >
+                {pkg.download_url}
+              </Snippet>
+              <div className="flex gap-2 flex-wrap items-center">
+                <Button
+                  as="a"
+                  href={pkg.download_url}
+                  size="sm"
+                  color="primary"
+                >
+                  Download .zip
+                </Button>
+                <Button
+                  size="sm"
+                  variant="flat"
+                  onPress={onBuild}
+                  isLoading={building}
+                >
+                  Rebuild
+                </Button>
+                <span className="text-xs text-default-500 font-mono">
+                  {pkg.package_id} · v{pkg.package_version}
+                </span>
+              </div>
+              <p className="text-xs text-warning">
+                Single-use download, valid 24h. Re-build if the link expires.
+              </p>
+            </div>
+          ) : (
+            <Button
+              size="sm"
+              color="primary"
+              onPress={onBuild}
+              isLoading={building}
+            >
+              Build .zip
+            </Button>
+          )}
+        </div>
+      )}
+
+      {pendingRevoke && (
+        <div className="border border-warning-200 rounded-medium p-3 bg-warning-50/40">
+          <p className="text-sm font-medium mb-2">
+            Un-enrolment bundle built
+          </p>
+          <p className="text-sm text-default-700 mb-3">
+            Apply the uninstall .zip on the kid's PC (same flow as enrol —
+            extract, right-click Uninstall.cmd → Run as administrator).
+            Then click <em>Mark applied</em> to clear the device's state here.
+          </p>
+          {pkg && (
+            <div className="flex flex-col gap-2">
+              <Snippet
+                size="sm"
+                symbol=""
+                classNames={{ pre: "whitespace-pre-wrap break-all" }}
+              >
+                {pkg.download_url}
+              </Snippet>
+              <div className="flex gap-2 flex-wrap items-center">
+                <Button
+                  as="a"
+                  href={pkg.download_url}
+                  size="sm"
+                  color="warning"
+                >
+                  Download uninstall .zip
+                </Button>
+                <Button
+                  size="sm"
+                  variant="flat"
+                  onPress={onRevoke}
+                  isLoading={revoking}
+                >
+                  Rebuild
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(pendingApply || pendingRevoke) && (
+        <div className="flex gap-2 flex-wrap">
+          <Button
+            size="sm"
+            color="success"
+            variant="flat"
+            onPress={onMarkApplied}
+            isLoading={marking}
+          >
+            Mark applied
+          </Button>
+        </div>
+      )}
+
+      {enrolled && (
+        <div className="flex gap-2 flex-wrap">
+          <Button
+            size="sm"
+            variant="flat"
+            onPress={onBuild}
+            isLoading={building}
+          >
+            Re-build .ppkg
+          </Button>
+          <Button
+            size="sm"
+            variant="flat"
+            color="danger"
+            onPress={onRevoke}
+            isLoading={revoking}
+          >
+            Build un-enrol .ppkg
+          </Button>
+        </div>
+      )}
+
+      {state && (
+        <details className="text-xs text-default-500">
+          <summary className="cursor-pointer">Package metadata</summary>
+          <div className="mt-1 font-mono break-all space-y-0.5">
+            <div>id:      {state.package_id}</div>
+            <div>version: {state.package_version}</div>
           </div>
         </details>
       )}

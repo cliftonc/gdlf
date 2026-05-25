@@ -20,6 +20,7 @@ import { z } from "zod";
 import {
   useKid,
   useActivity,
+  useBulkCdns,
   useServices,
   useTlsFailures,
 } from "../lib/queries";
@@ -29,12 +30,13 @@ import {
   useAddPassthrough,
   useRemovePassthrough,
   useSetBlockedApps,
-  useSetPassthrough,
+  useTogglePassthroughGroup,
   useDismissTlsFailure,
 } from "../lib/mutations";
 import type { Service, TlsFailureGroup } from "../lib/schemas";
 import { useConfirm } from "../lib/hooks/useConfirm";
 import { DeviceRow } from "../components/DeviceRow";
+import { KidStatsPanel } from "../components/KidStatsPanel";
 import { RuleRow } from "../components/RuleRow";
 import { ScheduleEditor } from "../components/ScheduleEditor";
 import { BonusControls } from "../components/BonusControls";
@@ -172,25 +174,32 @@ function KidDetailPage() {
 
 function DevicesTab({ name, devices }: { name: string; devices: import("../lib/schemas").Device[] }) {
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex justify-end">
-        <Button
-          as={Link}
-          to="/kids/$name/devices/new"
-          params={{ name }}
-          color="primary"
-        >
-          Add device
-        </Button>
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)] gap-6 items-start">
+      <aside className="order-2 lg:order-1">
+        <KidStatsPanel name={name} />
+      </aside>
+      <div className="order-1 lg:order-2 flex flex-col gap-3 min-w-0">
+        {devices.length === 0 ? (
+          <EmptyState
+            title="No devices yet"
+            body="Enrol a phone, tablet, or laptop to start filtering its traffic."
+          />
+        ) : (
+          devices.map((d) => (
+            <DeviceRow key={d.wg_ip} kidName={name} device={d} />
+          ))
+        )}
+        <div className="flex justify-end">
+          <Button
+            as={Link}
+            to="/kids/$name/devices/new"
+            params={{ name }}
+            color="primary"
+          >
+            Add device
+          </Button>
+        </div>
       </div>
-      {devices.length === 0 ? (
-        <EmptyState
-          title="No devices yet"
-          body="Enrol a phone, tablet, or laptop to start filtering its traffic."
-        />
-      ) : (
-        devices.map((d) => <DeviceRow key={d.wg_ip} kidName={name} device={d} />)
-      )}
     </div>
   );
 }
@@ -225,26 +234,14 @@ function RulesTab({ name }: { name: string }) {
   );
 }
 
-// A registrable domain `reg` is "enabled for passthrough" iff at least one
-// of its canonical glob forms is present in the kid's passthrough list.
-function groupPatterns(registrable: string): [string, string] {
-  return [registrable, `*.${registrable}`];
-}
-
-function isGroupEnabled(registrable: string, hosts: string[]): boolean {
-  const [a, b] = groupPatterns(registrable);
-  return hosts.includes(a) || hosts.includes(b);
-}
-
 // "Custom" host = an entry in the kid's passthrough list that isn't the
 // canonical apex / `*.<reg>` form of any observed group. These are the
 // rules the parent typed by hand and we don't want to clobber.
 function customHosts(hosts: string[], groups: TlsFailureGroup[]): string[] {
   const known = new Set<string>();
   for (const g of groups) {
-    const [a, b] = groupPatterns(g.registrable);
-    known.add(a);
-    known.add(b);
+    known.add(g.registrable);
+    known.add(`*.${g.registrable}`);
   }
   return hosts.filter((h) => !known.has(h));
 }
@@ -270,22 +267,36 @@ function PassthroughTab({
   hosts: string[];
 }) {
   const failures = useTlsFailures(name);
-  const setHosts = useSetPassthrough(name);
   const addHost = useAddPassthrough(name);
   const removeHost = useRemovePassthrough(name);
+  const toggleGroupMut = useTogglePassthroughGroup(name);
   const dismiss = useDismissTlsFailure();
   const [custom, setCustom] = useState("");
+  const [filter, setFilter] = useState("");
 
   const groups = failures.data ?? [];
   const manual = useMemo(() => customHosts(hosts, groups), [hosts, groups]);
 
-  const toggleGroup = (registrable: string, enable: boolean) => {
-    const [a, b] = groupPatterns(registrable);
-    const next = enable
-      ? Array.from(new Set([...hosts, a, b])).sort()
-      : hosts.filter((h) => h !== a && h !== b);
-    setHosts.mutate(next);
-  };
+  // Alphabetical by registrable is the default; search narrows by registrable
+  // OR any child host so pasted-in subdomain queries find their group.
+  const visibleGroups = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const filtered = q
+      ? groups.filter(
+          (g) =>
+            g.registrable.toLowerCase().includes(q) ||
+            g.children.some((c) => c.host.toLowerCase().includes(q)),
+        )
+      : groups;
+    return [...filtered].sort((a, b) =>
+      a.registrable.localeCompare(b.registrable),
+    );
+  }, [groups, filter]);
+
+  const disabledCount = useMemo(
+    () => groups.filter((g) => !g.enabled).length,
+    [groups],
+  );
 
   const submitCustom = () => {
     const v = custom.trim().toLowerCase();
@@ -294,97 +305,127 @@ function PassthroughTab({
   };
 
   return (
-    <div className="flex flex-col gap-6 max-w-2xl">
-      <div className="text-sm text-default-500 leading-relaxed">
+    <div className="flex flex-col gap-6">
+      <div className="text-sm text-default-500 leading-relaxed max-w-3xl">
         When an app refuses mitmproxy's certificate (pinned-cert apps like
-        TikTok, Instagram, banking) we capture the host here. Toggle a group
-        on to let mitmproxy pass that domain through untouched — DNS-level
-        blocking still applies, but we lose URL-level visibility for it.
+        TikTok, Instagram, banking) we capture the host here and let it
+        pass through untouched by default — DNS-level blocking still
+        applies, but we lose URL-level visibility for it. Toggle a group
+        off to force mitmproxy to try again (which will usually break the
+        app for that kid).
       </div>
 
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="flex flex-col gap-6 min-w-0">
       <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
-          Observed pinned domains
-        </h2>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
+            Observed pinned domains
+            {groups.length > 0 && (
+              <span className="ml-2 text-default-400 normal-case font-normal">
+                {groups.length} total
+                {disabledCount > 0 && ` · ${disabledCount} forced MITM`}
+              </span>
+            )}
+          </h2>
+        </div>
+        <Input
+          size="sm"
+          placeholder="Search domain or host…"
+          value={filter}
+          onValueChange={setFilter}
+          isClearable
+          onClear={() => setFilter("")}
+          className="max-w-sm"
+        />
         {failures.isLoading && <Spinner size="sm" />}
         {!failures.isLoading && groups.length === 0 && (
           <EmptyState
             title="No TLS failures observed yet"
-            body="When a pinned-cert app fails, it'll appear here grouped by domain."
+            body="When a pinned-cert app fails, it'll appear here grouped by domain — passthrough is on by default."
           />
         )}
-        {groups.length > 0 && (
+        {groups.length > 0 && visibleGroups.length === 0 && (
+          <p className="text-xs text-default-400 italic">
+            No domains match "{filter}".
+          </p>
+        )}
+        {visibleGroups.length > 0 && (
           <Accordion variant="bordered" selectionMode="multiple" isCompact>
-            {groups.map((g) => {
-              const enabled = isGroupEnabled(g.registrable, hosts);
-              return (
-                <AccordionItem
-                  key={g.registrable}
-                  aria-label={g.registrable}
-                  title={
-                    <div className="flex items-center justify-between gap-3 pr-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="font-mono text-sm truncate">
-                          {g.registrable}
-                        </span>
-                        <Chip size="sm" variant="flat" color="default">
-                          {g.children.length}
-                          {g.children.length === 1 ? " host" : " hosts"}
-                        </Chip>
-                        <span className="text-xs text-default-400 whitespace-nowrap">
-                          {formatRelative(g.ts_last)}
-                        </span>
-                      </div>
-                      <div onClick={(e) => e.stopPropagation()}>
-                        <Switch
-                          size="sm"
-                          isSelected={enabled}
-                          onValueChange={(v) =>
-                            toggleGroup(g.registrable, v)
-                          }
-                          isDisabled={setHosts.isPending}
-                          color="primary"
-                        >
-                          {enabled ? "Allowed" : "Allow"}
-                        </Switch>
-                      </div>
+            {visibleGroups.map((g) => (
+              <AccordionItem
+                key={g.registrable}
+                aria-label={g.registrable}
+                title={
+                  <div className="flex items-center justify-between gap-3 pr-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-mono text-sm truncate">
+                        {g.registrable}
+                      </span>
+                      <Chip size="sm" variant="flat" color="default">
+                        {g.children.length}
+                        {g.children.length === 1 ? " host" : " hosts"}
+                      </Chip>
+                      <span className="text-xs text-default-400 whitespace-nowrap">
+                        {formatRelative(g.ts_last)}
+                      </span>
                     </div>
-                  }
-                >
-                  <ul className="flex flex-col gap-1 pl-1">
-                    {g.children.map((c) => (
-                      <li
-                        key={`${c.id}-${c.host}`}
-                        className="flex items-center justify-between gap-2 py-1"
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <Switch
+                        size="sm"
+                        isSelected={g.enabled}
+                        onValueChange={(v) =>
+                          toggleGroupMut.mutate({
+                            registrable: g.registrable,
+                            enabled: v,
+                          })
+                        }
+                        isDisabled={
+                          toggleGroupMut.isPending &&
+                          toggleGroupMut.variables?.registrable ===
+                            g.registrable
+                        }
+                        color="primary"
                       >
-                        <div className="flex flex-col min-w-0">
-                          <span className="font-mono text-xs truncate">
-                            {c.host}
-                          </span>
-                          <span className="text-[11px] text-default-400">
-                            {c.count}× · last {formatRelative(c.ts_last)}
-                            {c.device && ` · ${c.device}`}
-                          </span>
-                        </div>
-                        {c.id != null && (
-                          <Button
-                            size="sm"
-                            variant="light"
-                            color="default"
-                            isLoading={
-                              dismiss.isPending && dismiss.variables === c.id
-                            }
-                            onPress={() => dismiss.mutate(c.id as number)}
-                          >
-                            Dismiss
-                          </Button>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </AccordionItem>
-              );
-            })}
+                        {g.enabled ? "Passthrough" : "Forced MITM"}
+                      </Switch>
+                    </div>
+                  </div>
+                }
+              >
+                <ul className="flex flex-col gap-1 pl-1">
+                  {g.children.map((c) => (
+                    <li
+                      key={`${c.id}-${c.host}`}
+                      className="flex items-center justify-between gap-2 py-1"
+                    >
+                      <div className="flex flex-col min-w-0">
+                        <span className="font-mono text-xs truncate">
+                          {c.host}
+                        </span>
+                        <span className="text-[11px] text-default-400">
+                          {c.count}× · last {formatRelative(c.ts_last)}
+                          {c.device && ` · ${c.device}`}
+                        </span>
+                      </div>
+                      {c.id != null && (
+                        <Button
+                          size="sm"
+                          variant="light"
+                          color="default"
+                          isLoading={
+                            dismiss.isPending && dismiss.variables === c.id
+                          }
+                          onPress={() => dismiss.mutate(c.id as number)}
+                        >
+                          Dismiss
+                        </Button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </AccordionItem>
+            ))}
           </Accordion>
         )}
       </section>
@@ -443,7 +484,93 @@ function PassthroughTab({
           </ul>
         )}
       </section>
+      </div>
+
+      <BulkCdnPanel />
+      </div>
     </div>
+  );
+}
+
+function BulkCdnPanel() {
+  const cdns = useBulkCdns();
+  const [filter, setFilter] = useState("");
+
+  const groups = cdns.data?.groups ?? [];
+  const visible = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return groups;
+    return groups
+      .map((g) => ({
+        ...g,
+        patterns: g.patterns.filter((p) => p.toLowerCase().includes(q)),
+      }))
+      .filter(
+        (g) =>
+          g.vendor.toLowerCase().includes(q) || g.patterns.length > 0,
+      );
+  }, [groups, filter]);
+
+  return (
+    <section className="flex flex-col gap-2 min-w-0">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-default-500">
+          Global CDN defaults
+        </h2>
+        {cdns.data && (
+          <span className="text-xs text-default-400">
+            {cdns.data.total} patterns
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-default-400">
+        TLS passthrough applied to every kid for bulk-content CDNs (game
+        downloads, OS updates, speed tests). Edit in{" "}
+        <span className="font-mono">services/rules-svc/src/gdlf/bulk_cdns.py</span>
+        .
+      </p>
+      <Input
+        size="sm"
+        placeholder="Search vendor or pattern…"
+        value={filter}
+        onValueChange={setFilter}
+        isClearable
+        onClear={() => setFilter("")}
+      />
+      {cdns.isLoading && <Spinner size="sm" />}
+      {cdns.error && (
+        <p className="text-xs text-danger">Couldn't load CDN list.</p>
+      )}
+      {!cdns.isLoading && visible.length === 0 && (
+        <p className="text-xs text-default-400 italic">No matches.</p>
+      )}
+      {visible.length > 0 && (
+        <Accordion variant="bordered" selectionMode="multiple" isCompact>
+          {visible.map((g) => (
+            <AccordionItem
+              key={g.vendor}
+              aria-label={g.vendor}
+              title={
+                <div className="flex items-center gap-2 min-w-0 pr-2">
+                  <span className="text-sm truncate">{g.vendor}</span>
+                  <Chip size="sm" variant="flat" color="default">
+                    {g.patterns.length}
+                  </Chip>
+                </div>
+              }
+            >
+              <ul className="flex flex-col gap-0.5 pl-1">
+                {g.patterns.map((p) => (
+                  <li key={p} className="font-mono text-xs text-default-600">
+                    {p}
+                  </li>
+                ))}
+              </ul>
+            </AccordionItem>
+          ))}
+        </Accordion>
+      )}
+    </section>
   );
 }
 

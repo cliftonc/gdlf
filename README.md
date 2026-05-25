@@ -18,11 +18,11 @@ enrol devices via QR, edit per-kid rules, view real-time activity, get
 push/email alerts on flagged events. `config/kids.yaml` is the
 declarative source of truth — UI edits and hand edits cooperate.
 
-For iOS and Android, optional **MDM enrolment** upgrades the guardrail
-into actual containment: always-on WireGuard the kid can't toggle,
-system-trusted mitmproxy CA (every app, not just browsers), and
-restrictions blocking the obvious bypass paths (add VPN, install
-profile, factory reset, uninstall the tunnel). See setup guides below.
+For iOS, Android and Windows, optional **MDM enrolment** upgrades the
+guardrail into actual containment: always-on WireGuard the kid can't
+toggle, system-trusted mitmproxy CA (every app, not just browsers), and
+restrictions blocking the obvious bypass paths (add VPN, install profile,
+factory reset, uninstall the tunnel). See setup guides below.
 
 ## Layout
 
@@ -35,6 +35,7 @@ docs/
   design.md                 # original design discussion
   setup-android-mdm.md      # parent walk-through: Android MDM (AMAPI)
   setup-apple-mdm.md        # parent walk-through: Apple iOS MDM
+  setup-windows-mdm.md      # parent walk-through: Windows .ppkg enrolment
 config/
   kids.example.yaml         # template committed to the repo
   kids.yaml                 # *** source of truth *** (gitignored — your real policy)
@@ -58,15 +59,17 @@ Each service has its own `CLAUDE.md` with module-level detail and gotchas.
 
 ```
 cp .env.example .env       # edit WG_HOST (your DDNS / LAN IP) + passwords
-./gdlf init                # one-time: generate the mitmproxy CA
+./gdlf init                # one-time: mitmproxy CA + seed AdGuard admin
 ./gdlf up                  # build + start the stack
 open http://localhost:8080 # dashboard (parent UI)
-open http://localhost:3000 # AdGuard's first-run wizard (only on first boot)
 ```
 
-After AdGuard's wizard, its admin UI moves to **http://localhost:8082**.
-Use port **80** and **53** as the defaults during the wizard — anything
-else breaks our DNS redirect.
+`./gdlf init` generates an `ADGUARD_ADMIN_PASSWORD` (if it's still
+`change-me`), writes it back to `.env`, and seeds
+`config/adguard/conf/AdGuardHome.yaml` so AdGuard skips its first-run
+wizard entirely. The credentials and an "Open AdGuard" link live on the
+dashboard's **Settings** page; AdGuard's own UI is on
+`http://<host>:${ADGUARD_UI_PORT:-8082}`.
 
 ## Enrolling a kid's device
 
@@ -95,9 +98,15 @@ at the OS level on a supervised / device-owner phone:
   one-time setup (APNs cert + signing CA + Cloudflare DNS-01), then
   Apple Configurator 2 on a Mac with the phone cabled in. See
   [docs/setup-apple-mdm.md](docs/setup-apple-mdm.md).
+- **Windows 10 / 11** (Home, Pro, Education, Enterprise) — a signed
+  Provisioning Package the parent applies once as Administrator. No live
+  channel; the kid runs as a Standard User as the containment boundary.
+  ~10-minute one-time setup. See
+  [docs/setup-windows-mdm.md](docs/setup-windows-mdm.md).
 
-Both paths require wiping the phone — Device Owner / supervised mode
-can only be set during initial provisioning. Devices you can't wipe
+Android / iOS require wiping the device — Device Owner / supervised mode
+can only be set during initial provisioning. Windows does not require a
+wipe. Devices you can't wipe (and can't run a Standard User account on)
 fall back to the manual flow above.
 
 ## Adding rules
@@ -149,4 +158,5 @@ On a real Linux host this isn't an issue.
 - [`docs/design.md`](docs/design.md) — original design discussion
 - [`docs/setup-android-mdm.md`](docs/setup-android-mdm.md) — Android MDM walk-through
 - [`docs/setup-apple-mdm.md`](docs/setup-apple-mdm.md) — iOS MDM walk-through
+- [`docs/setup-windows-mdm.md`](docs/setup-windows-mdm.md) — Windows .ppkg enrolment walk-through
 - Per-service `CLAUDE.md` under `services/*/` and `nftables/`

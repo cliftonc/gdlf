@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   Button,
@@ -30,6 +31,7 @@ function SettingsPage() {
   const s = useSettings();
   const prune = usePruneNow();
   const confirm = useConfirm();
+  const [showAgPw, setShowAgPw] = useState(false);
 
   const onPrune = async () => {
     const ok = await confirm({
@@ -87,6 +89,61 @@ function SettingsPage() {
               </a>
             </div>
           )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <p className="text-sm font-semibold">AdGuard admin</p>
+        </CardHeader>
+        <CardBody className="flex flex-col gap-3">
+          <p className="text-sm text-default-500">
+            DNS filtering UI. Sign in with the credentials below; rules-svc
+            syncs per-kid client config every 60s on top.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+            <Stat label="Username" value={s.data.adguard_admin_user} />
+            <div>
+              <p className="text-xs uppercase tracking-wide text-default-500">Password</p>
+              <div className="flex items-center gap-2">
+                <p className="font-mono text-sm break-all">
+                  {showAgPw
+                    ? s.data.adguard_admin_password || "(unset)"
+                    : "••••••••••••"}
+                </p>
+                <Button
+                  size="sm"
+                  variant="light"
+                  onPress={() => setShowAgPw((v) => !v)}
+                >
+                  {showAgPw ? "Hide" : "Show"}
+                </Button>
+                {s.data.adguard_admin_password && (
+                  <Button
+                    size="sm"
+                    variant="light"
+                    onPress={() =>
+                      navigator.clipboard?.writeText(s.data!.adguard_admin_password)
+                    }
+                  >
+                    Copy
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+          <div>
+            <Button
+              as="a"
+              href={`${window.location.protocol}//${window.location.hostname}:${s.data.adguard_ui_port}/`}
+              target="_blank"
+              rel="noreferrer"
+              color="primary"
+              variant="flat"
+            >
+              Open AdGuard
+            </Button>
+          </div>
         </CardBody>
       </Card>
 
