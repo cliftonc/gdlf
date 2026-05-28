@@ -44,6 +44,10 @@ class Settings:
     # Public origin of the MDM endpoints; embedded in enrollment profiles.
     # e.g. "https://gdlf.cliftonc.nl:8443". Empty disables /mdm/* routes.
     mdm_base_url: str
+    # Shared secret Caddy adds when proxying device MDM check-in/server
+    # requests. Prevents direct rules-svc callers from spoofing forwarded
+    # client-cert headers on the dashboard port.
+    mdm_proxy_secret: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -72,6 +76,7 @@ class Settings:
             stats_bucket_secs=int(os.environ.get("STATS_BUCKET_SECS") or 300),
             stats_flush_secs=int(os.environ.get("STATS_FLUSH_SECS") or 30),
             mdm_base_url=os.environ.get("MDM_BASE_URL", ""),
+            mdm_proxy_secret=os.environ.get("MDM_PROXY_SECRET", ""),
         )
 
 

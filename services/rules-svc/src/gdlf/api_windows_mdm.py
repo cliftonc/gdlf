@@ -4,7 +4,7 @@
        Build a fresh enrolment .zip, stash it, mint a one-time download
        token, return the download URL.
 
-  GET  /devices/{ip}/windows-mdm/package.zip?t=<token>  (public)
+  GET  /dl/windows-mdm/package.zip?t=<token>  (public)
        Single-use download. Burns the token + deletes the stashed blob
        on the first successful fetch. Public so the parent can copy the
        URL to the kid's PC and hit it from a browser there.
@@ -74,15 +74,14 @@ def _device_or_404(ip: str):
 
 
 class PackageResponse(BaseModel):
-    download_url: str          # /devices/{ip}/windows-mdm/package.zip?t=...
+    download_url: str          # /dl/windows-mdm/package.zip?t=...
     package_id: str            # GUID baked into the package
     package_version: str
     signed: bool               # True iff Authenticode signature attached
     expires_at: datetime
 
 
-@router.post("/api/devices/{ip}/windows-mdm/enroll-package")
-def build_enroll_package(ip: str, request: Request) -> PackageResponse:
+def _build_enroll_package(ip: str, request: Request) -> PackageResponse:
     _, kid, device = _device_or_404(ip)
 
     # Bake the dashboard URL + device shortlink into install.ps1 so it
@@ -144,12 +143,23 @@ def build_enroll_package(ip: str, request: Request) -> PackageResponse:
     store.mutate(mark_built)
 
     return PackageResponse(
-        download_url=f"/devices/{ip}/windows-mdm/package.zip?t={handle}",
+        download_url=f"/dl/windows-mdm/package.zip?t={handle}",
         package_id=built.package_id,
         package_version=built.package_version,
         signed=built.signed,
         expires_at=expires_at,
     )
+
+
+@router.post("/api/devices/{ip}/windows-mdm/enroll-package")
+def build_enroll_package(ip: str, request: Request) -> PackageResponse:
+    return _build_enroll_package(ip, request)
+
+
+@router.post("/api/dl/{code}/windows-mdm/enroll-package")
+def build_enroll_package_by_code(code: str, request: Request) -> PackageResponse:
+    _, device = api_shortlinks.device_for_code(code)
+    return _build_enroll_package(device.wg_ip, request)
 
 
 # --- Public: download the built package ------------------------------------
@@ -196,6 +206,38 @@ def download_package(ip: str, t: str) -> Response:
     )
 
 
+@router.get("/dl/windows-mdm/package.zip")
+def download_package_by_token(t: str) -> Response:
+    """Single-use download without leaking the device IP in the URL."""
+    now = datetime.utcnow()
+    with db.session() as s:
+        row = s.exec(
+            select(db.WindowsEnrollToken).where(db.WindowsEnrollToken.token == t)
+        ).first()
+        if not row:
+            raise HTTPException(404, "unknown download token")
+        if row.used_at is not None:
+            raise HTTPException(410, "download token already used")
+        if row.expires_at < now:
+            raise HTTPException(410, "download token expired")
+        is_revoke = bool(row.revoke)
+        row.used_at = now
+        s.add(row)
+        s.commit()
+
+    try:
+        blob = package.unstash(t)
+    except FileNotFoundError:
+        raise HTTPException(410, "package no longer available")
+
+    filename = f"gdlf-{'uninstall' if is_revoke else 'install'}.zip"
+    return Response(
+        content=blob,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # --- Admin: parent attests the package applied -----------------------------
 
 
@@ -239,6 +281,12 @@ def mark_enrolled(ip: str) -> dict:
                     })
     store.mutate(confirm)
     return {"ok": True, "status": "revoked" if is_revoke else "enrolled"}
+
+
+@router.post("/api/dl/{code}/windows-mdm/mark-enrolled")
+def mark_enrolled_by_code(code: str) -> dict:
+    _, device = api_shortlinks.device_for_code(code)
+    return mark_enrolled(device.wg_ip)
 
 
 # --- Admin: build a revocation package -------------------------------------
@@ -292,7 +340,7 @@ def build_revoke_package(ip: str) -> PackageResponse:
     store.mutate(mark_pending_revoke)
 
     return PackageResponse(
-        download_url=f"/devices/{ip}/windows-mdm/package.zip?t={handle}",
+        download_url=f"/dl/windows-mdm/package.zip?t={handle}",
         package_id=built.package_id,
         package_version=built.package_version,
         signed=built.signed,

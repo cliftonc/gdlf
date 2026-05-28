@@ -1,10 +1,9 @@
 """Device enrolment shortlinks — `/dl/{code}`.
 
-A shortcode is a 4-char base32 string bound to one device's `wg_ip`. It
-authenticates the bearer for *that device only*, on the device-scoped
-endpoints used by the enrolment page (handshake, mark-CA, MDM enroll-token
-mints). The parent generates one from the dashboard, then opens the short
-URL on the kid's device — no login required there.
+A shortcode is an 8-char base32 string bound to one device's `wg_ip`. It
+authenticates the bearer for code-only enrollment endpoints used by the
+shared page. The IP may be displayed to help the parent debug enrollment,
+but it is never accepted as authorization on public routes.
 
   POST   /api/devices/{ip}/shortlink  (admin) — create or rotate.
   DELETE /api/devices/{ip}/shortlink  (admin) — revoke.
@@ -14,20 +13,27 @@ URL on the kid's device — no login required there.
 """
 from __future__ import annotations
 
+import io
 import secrets
+from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+import qrcode
+import qrcode.image.svg
+from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from . import db, store
+from . import db, store, wg
+from .dto import device_dto
 
 router = APIRouter(tags=["shortlinks"])
 
-# Crockford-ish base32 without confusable chars (0/O, 1/I/L). 4 chars =
-# ~1M codes; we collide-retry on insert so this is plenty.
+# Crockford-ish base32 without confusable chars (0/O, 1/I/L). 8 chars =
+# ~40 bits. Short enough to hand-type, but no longer trivially enumerable
+# on a home LAN when paired with narrow code-only endpoints.
 _ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-_CODE_LEN = 4
+_CODE_LEN = 8
 
 
 def _new_code() -> str:
@@ -52,7 +58,8 @@ def ensure_shortlinks_for_all_devices() -> int:
     cfg = store.load()
     minted = 0
     for _kid, device in cfg.all_devices():
-        if shortlink_for_ip(device.wg_ip) is None:
+        code = shortlink_for_ip(device.wg_ip)
+        if code is None or len(code) < _CODE_LEN:
             try:
                 mint_shortlink(device.wg_ip)
                 minted += 1
@@ -86,6 +93,23 @@ def ip_for_code(code: str) -> str | None:
     with db.session() as s:
         row = s.get(db.DeviceShortlink, code)
         return row.wg_ip if row else None
+
+
+def device_for_code(code: str):
+    """Resolve a shortlink to (kid, device), pruning stale rows lazily."""
+    ip = ip_for_code(code)
+    if not ip:
+        raise HTTPException(404, "unknown shortlink")
+    cfg = store.load(force=True)
+    found = cfg.device_by_ip(ip)
+    if not found:
+        with db.session() as s:
+            row = s.get(db.DeviceShortlink, code)
+            if row:
+                s.delete(row)
+                s.commit()
+        raise HTTPException(404, "device no longer exists")
+    return found[0], found[1]
 
 
 def _device_or_404(ip: str):
@@ -146,20 +170,84 @@ class ResolveResponse(BaseModel):
 @router.get("/api/dl/{code}/resolve")
 def resolve(code: str) -> ResolveResponse:
     """Public: the SPA at /dl/{code} calls this to discover the device + kid
-    it should render the enrolment page for. The code itself remains the
-    bearer auth for the subsequent `?dl=<code>` API calls."""
-    ip = ip_for_code(code)
-    if not ip:
-        raise HTTPException(404, "unknown shortlink")
-    cfg = store.load()
-    found = cfg.device_by_ip(ip)
-    if not found:
-        # Device deleted underneath; orphan the shortlink lazily.
-        with db.session() as s:
-            row = s.get(db.DeviceShortlink, code)
-            if row:
-                s.delete(row)
-                s.commit()
-        raise HTTPException(404, "device no longer exists")
-    kid, device = found
-    return ResolveResponse(kid=kid.name, ip=ip, device_name=device.name)
+    it should render. Subsequent shared-page calls use code-only /api/dl/*
+    endpoints; the device IP is never an authorizer."""
+    kid, device = device_for_code(code)
+    return ResolveResponse(kid=kid.name, ip=device.wg_ip, device_name=device.name)
+
+
+def _ca_present() -> bool:
+    return Path("/etc/gdlf/mitmproxy/mitmproxy-ca-cert.pem").exists()
+
+
+def _render_client_conf(code: str) -> tuple[str, str]:
+    kid, device = device_for_code(code)
+    peer_id = f"{wg.slug(kid.name)}__{wg.slug(device.name)}"
+    try:
+        priv = wg.load_peer_priv(peer_id)
+    except FileNotFoundError:
+        raise HTTPException(500, "private key missing — re-enrol device")
+    return peer_id, wg.build_client_conf(device.name, priv, device.wg_ip)
+
+
+@router.get("/api/dl/{code}/enrolment")
+def code_enrolment(code: str) -> dict:
+    """Code-only enrollment payload for the shared /dl/<code> page."""
+    _, device = device_for_code(code)
+    handshakes = wg.wg_show_handshakes()
+    return {
+        "device": device_dto(device, handshakes.get(device.wg_ip)),
+        "qr_url": f"/api/dl/{code}/qr",
+        "conf_url": f"/api/dl/{code}/conf",
+        "ca_url": "/ca.pem",
+        "ca_qr_url": "/ca/qr",
+        "ca_present": _ca_present(),
+    }
+
+
+@router.get("/api/dl/{code}/conf", response_class=PlainTextResponse)
+def code_device_conf(code: str):
+    peer_id, conf = _render_client_conf(code)
+    return PlainTextResponse(
+        conf,
+        headers={"Content-Disposition": f'attachment; filename="{peer_id}.conf"'},
+    )
+
+
+@router.get("/api/dl/{code}/qr")
+def code_device_qr(code: str):
+    _, conf = _render_client_conf(code)
+    img = qrcode.make(conf, image_factory=qrcode.image.svg.SvgPathImage)
+    buf = io.BytesIO()
+    img.save(buf)
+    return Response(content=buf.getvalue(), media_type="image/svg+xml")
+
+
+@router.get("/api/dl/{code}/handshake")
+def code_handshake(code: str) -> dict:
+    _, device = device_for_code(code)
+    hs = wg.wg_show_handshakes().get(device.wg_ip, {})
+    return {
+        "last_handshake": hs.get("last_handshake", 0),
+        "rx": hs.get("rx", 0),
+        "tx": hs.get("tx", 0),
+    }
+
+
+class MitmInstalledBody(BaseModel):
+    installed: bool = True
+
+
+@router.put("/api/dl/{code}/mitm-installed")
+def code_mark_mitm(code: str, body: MitmInstalledBody) -> dict:
+    _, device = device_for_code(code)
+    ip = device.wg_ip
+
+    def mark(cfg):
+        for k in cfg.kids:
+            for d in k.devices:
+                if d.wg_ip == ip:
+                    d.mitm_ca_installed = body.installed
+
+    store.mutate(mark)
+    return {"mitm_ca_installed": body.installed}

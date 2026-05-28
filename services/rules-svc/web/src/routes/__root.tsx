@@ -6,9 +6,8 @@ import { api, ApiError } from "../lib/api";
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
     if (location.pathname.startsWith("/login")) return;
-    // Shortlink enrolment pages authenticate per-request via `?dl=<code>`;
-    // they intentionally work without a parent session, so don't bounce to
-    // /login if the user happens to be unauthenticated.
+    // Shortlink enrolment pages use code-only /api/dl/* endpoints; they
+    // intentionally work without a parent session, so don't bounce to /login.
     if (location.pathname.startsWith("/dl/")) return;
     try {
       await api("/api/auth/me");

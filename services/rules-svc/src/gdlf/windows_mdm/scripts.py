@@ -259,14 +259,14 @@ Log "enrolment complete"
 
 # 9. Phone home: best-effort POST to the dashboard's mark-enrolled
 #    endpoint so the parent doesn't have to click "Mark applied" by hand.
-#    Uses the shortlink (`?dl=<code>`) for auth — same mechanism the
+#    Uses the shortlink's code-only endpoint for auth — same mechanism the
 #    enrolment page already supports. The tunnel is up by now, so the
 #    POST routes through the kid's WG connection; if the kid's PC is on
 #    the dashboard's LAN it'll succeed even without the tunnel.
 #
 #    Failures here are non-fatal — the parent's manual button still works.
 if ($dashboardBase -and $shortlink) {
-    $markUrl = "$dashboardBase/api/devices/$wgIp/windows-mdm/mark-enrolled?dl=$shortlink"
+    $markUrl = "$dashboardBase/api/dl/$shortlink/windows-mdm/mark-enrolled"
     Log "phoning home: $markUrl"
     try {
         # TLS 1.2 explicit for old WinPS 5.1 sessions where Net.ServicePointManager defaults to SSL3/TLS 1.0.
@@ -484,7 +484,7 @@ try { $shortlink = (Get-ItemProperty -Path $enrollKey -Name "Shortlink" -ErrorAc
 
 # 0. Phone home FIRST while the tunnel is still up. Best-effort.
 if ($dashboardBase -and $shortlink -and $wgIp) {
-    $markUrl = "$dashboardBase/api/devices/$wgIp/windows-mdm/mark-enrolled?dl=$shortlink"
+    $markUrl = "$dashboardBase/api/dl/$shortlink/windows-mdm/mark-enrolled"
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         Invoke-RestMethod -Uri $markUrl -Method POST -TimeoutSec 5 | Out-Null

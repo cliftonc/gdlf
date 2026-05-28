@@ -25,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlmodel import select
 
-from . import db, store
+from . import api_shortlinks, db, store
 from .schema import MdmState
 from .settings import settings
 from .mdm import apns, checkin, commands, enrollment, orchestrator, server
@@ -33,6 +33,21 @@ from .mdm import apns, checkin, commands, enrollment, orchestrator, server
 router = APIRouter(tags=["mdm"])
 
 ENROLL_TOKEN_TTL = timedelta(minutes=30)
+
+
+def _require_mdm_proxy(request: Request) -> None:
+    """Reject direct calls to mTLS-protected MDM endpoints.
+
+    Caddy verifies the device client certificate and forwards its subject in
+    headers. Because rules-svc is also reachable on the dashboard port, require
+    a shared Caddy-only header before trusting those forwarded headers.
+    """
+    expected = settings.mdm_proxy_secret
+    if not expected:
+        raise HTTPException(503, "MDM_PROXY_SECRET not configured")
+    got = request.headers.get("X-Gdlf-Mdm-Proxy-Secret")
+    if got != expected:
+        raise HTTPException(401, "MDM proxy authentication required")
 
 
 # --- Admin: issue an enrollment token --------------------------------------
@@ -44,8 +59,7 @@ class EnrollTokenResponse(BaseModel):
     expires_at: datetime
 
 
-@router.post("/api/devices/{ip}/mdm/enroll-token")
-def create_enroll_token(ip: str) -> EnrollTokenResponse:
+def _create_enroll_token(ip: str) -> EnrollTokenResponse:
     if not settings.mdm_base_url:
         raise HTTPException(503, "MDM_BASE_URL not configured")
 
@@ -85,6 +99,17 @@ def create_enroll_token(ip: str) -> EnrollTokenResponse:
         enroll_url=f"{settings.mdm_base_url}/mdm/enroll/{token}",
         expires_at=expires_at,
     )
+
+
+@router.post("/api/devices/{ip}/mdm/enroll-token")
+def create_enroll_token(ip: str) -> EnrollTokenResponse:
+    return _create_enroll_token(ip)
+
+
+@router.post("/api/dl/{code}/mdm/enroll-token")
+def create_enroll_token_by_code(code: str) -> EnrollTokenResponse:
+    _, device = api_shortlinks.device_for_code(code)
+    return _create_enroll_token(device.wg_ip)
 
 
 # --- Public: serve the .mobileconfig ---------------------------------------
@@ -147,6 +172,7 @@ def serve_enrollment_profile(token: str) -> Response:
 
 @router.post("/mdm/checkin")
 async def mdm_checkin(request: Request) -> Response:
+    _require_mdm_proxy(request)
     body = await request.body()
     subject = request.headers.get("X-Mdm-Client-Subject")
     try:
@@ -163,6 +189,7 @@ async def mdm_checkin(request: Request) -> Response:
 async def mdm_server(request: Request) -> Response:
     """Apple's MDM command channel. Devices POST here after an APNs
     wake-up; we respond with the next pending command (or empty 200)."""
+    _require_mdm_proxy(request)
     body = await request.body()
     subject = request.headers.get("X-Mdm-Client-Subject")
     try:

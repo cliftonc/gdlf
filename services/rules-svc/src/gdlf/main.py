@@ -10,7 +10,8 @@ The HTTP surface is split into two:
 
 Non-API utility routes (`/ca.pem`, `/ca/qr`, `/devices/{ip}/conf`,
 `/devices/{ip}/qr`, `/healthz`) return binary / SVG / plaintext and stay
-where they are.
+where they are. Device config routes require cookie auth; shared enrolment
+uses code-only `/api/dl/{code}/conf` + `/api/dl/{code}/qr`.
 """
 from __future__ import annotations
 
@@ -75,6 +76,7 @@ async def lifespan(app: FastAPI):
         logging.getLogger("gdlf.shortlinks").warning("shortlink backfill failed: %s", e)
     store.bind_event_loop(asyncio.get_running_loop())
     sync_task = asyncio.create_task(adguard.sync_loop())
+    adguard_watchdog_task = asyncio.create_task(adguard.health_watchdog_loop())
     prune_task = asyncio.create_task(_prune_loop())
     amapi_task = asyncio.create_task(amapi_orchestrator.status_sync_loop())
     amapi_watch_task = asyncio.create_task(_amapi_policy_watch_loop())
@@ -82,6 +84,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         sync_task.cancel()
+        adguard_watchdog_task.cancel()
         prune_task.cancel()
         amapi_task.cancel()
         amapi_watch_task.cancel()
@@ -190,61 +193,22 @@ _PUBLIC_API_PATHS = {
 _PUBLIC_API_PREFIXES = ("/api/dl/",)
 _PUBLIC_FILES = {"/favicon.png", "/logo-64.png", "/logo-256.png", "/gandalf.png"}
 
-# Regex used by `_dl_path_ip` to confirm a `?dl=<code>` query parameter is
-# being applied to an endpoint scoped to one device's wg_ip (the only thing
-# the code is authorised for). Matches the two URL shapes the enrolment
-# page uses: /api/devices/{ip}/... and /api/kids/{name}/devices/{ip}/....
-import re as _re
-_DL_PATH_RE = _re.compile(
-    r"^/api/(?:devices/(?P<ip1>[0-9.]+)(?:/|$)"
-    r"|kids/[^/]+/devices/(?P<ip2>[0-9.]+)(?:/|$))"
-)
-
-
-def _dl_path_ip(path: str) -> str | None:
-    m = _DL_PATH_RE.match(path)
-    if not m:
-        return None
-    return m.group("ip1") or m.group("ip2")
-
 
 def _is_public(path: str) -> bool:
     if path in _PUBLIC_PATHS or path in _PUBLIC_API_PATHS or path in _PUBLIC_FILES:
         return True
     if any(path.startswith(p) for p in _PUBLIC_API_PREFIXES):
         return True
-    if path.startswith("/devices/") and (
-        path.endswith("/conf")
-        or path.endswith("/qr")
-        or path.endswith("/android-mdm/qr.png")
-        or path.endswith("/windows-mdm/package.zip")
-        or path.endswith("/windows-mdm/package.ppkg")  # legacy URL
-    ):
-        return True
     # MDM endpoints: device-presented at TLS layer (mTLS verified by Caddy),
     # never reached by a browser; bypass the cookie auth.
     if path.startswith("/mdm/"):
         return True
     # SPA shortlink page: served as the SPA shell to anyone with the URL.
-    # The page authenticates subsequent API calls via `?dl=<code>`.
+    # Code-only download helpers under /dl/* are explicit routes declared
+    # before the SPA fallback; the fallback itself handles /dl/<code>.
     if path.startswith("/dl/"):
         return True
     return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
-
-
-def _dl_auth_ok(request: Request) -> bool:
-    """Allow `?dl=<code>` to authenticate device-scoped /api/* requests.
-
-    The code is bound to a single wg_ip in the `device_shortlinks` table;
-    we accept the request iff the IP embedded in the URL path matches."""
-    code = request.query_params.get("dl")
-    if not code:
-        return False
-    ip = _dl_path_ip(request.url.path)
-    if not ip:
-        return False
-    bound = api_shortlinks.ip_for_code(code)
-    return bound is not None and bound == ip
 
 
 @app.middleware("http")
@@ -255,8 +219,6 @@ async def require_auth(request: Request, call_next):
     if _is_public(path):
         return await call_next(request)
     if auth.check_token(request.cookies.get(auth.COOKIE)):
-        return await call_next(request)
-    if path.startswith("/api/") and _dl_auth_ok(request):
         return await call_next(request)
     if path.startswith("/api/"):
         return JSONResponse({"error": "unauthenticated"}, status_code=401)
@@ -493,10 +455,7 @@ def get_passthrough():
         # block/flag rule. Without the union, domain-only block rules would
         # silently never fire (the addon would splice, /api/decision never
         # called). See `rules.hosts_with_block_or_flag_rules` rationale.
-        kid_inspect = sorted({
-            *kid.mitm_inspect_hosts,
-            *rules.hosts_with_block_or_flag_rules(kid),
-        })
+        kid_inspect = rules.effective_inspect_hosts(kid)
         for d in kid.devices:
             if not d.wg_ip:
                 continue

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 
 import httpx
@@ -279,3 +280,81 @@ async def _run_pass() -> None:
         await refresh_service_hosts_index()
     except Exception as e:
         log.debug("service hosts refresh raised: %s", e)
+
+
+# ---- Reachability watchdog ----
+#
+# Observed on first boot: AdGuard's process starts and binds (loopback
+# tests pass), but external connections to its bridge IP get refused or
+# reset — most likely a race between AdGuard's IPv6 dual-stack listener
+# and wg's interface bring-up inside the shared netns. A plain
+# `docker restart gdlf-adguard` clears it. The watchdog probes AdGuard
+# the same way the rest of rules-svc does (via the bridge IP, not
+# loopback) and pokes docker if it stays unreachable.
+
+_DOCKER_SOCK = "/var/run/docker.sock"
+
+
+def _restart_container(name: str) -> None:
+    """POST /containers/<name>/restart over the unix socket."""
+    transport = httpx.HTTPTransport(uds=_DOCKER_SOCK)
+    with httpx.Client(transport=transport, base_url="http://docker", timeout=20.0) as c:
+        r = c.post(f"/containers/{name}/restart")
+        r.raise_for_status()
+
+
+async def _probe() -> None:
+    """Raise if AdGuard's API isn't answering on its bridge IP."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        r = await client.get(
+            f"{settings.adguard_url}/control/status", auth=_auth()
+        )
+        # 401 still proves the listener is responding; anything 5xx or a
+        # transport error means AdGuard is wedged.
+        if r.status_code >= 500:
+            raise RuntimeError(f"adguard /control/status -> {r.status_code}")
+
+
+async def health_watchdog_loop(
+    warmup: float = 60.0,
+    probe_interval: float = 30.0,
+    fail_threshold: int = 3,
+    restart_cooldown: float = 300.0,
+) -> None:
+    """Restart AdGuard if it's been silently unreachable from rules-svc.
+
+    Probes `/control/status` over the gdlf bridge every `probe_interval`s.
+    After `fail_threshold` consecutive failures, asks docker to restart the
+    AdGuard container, then sits out `restart_cooldown`s before probing
+    again so we don't thrash if AdGuard is genuinely down.
+    """
+    if not os.path.exists(_DOCKER_SOCK):
+        log.info("docker socket missing — adguard watchdog disabled")
+        return
+    container = os.environ.get("ADGUARD_CONTAINER", "gdlf-adguard")
+    await asyncio.sleep(warmup)
+    consecutive_failures = 0
+    while True:
+        try:
+            await _probe()
+        except Exception as e:
+            consecutive_failures += 1
+            log.warning(
+                "adguard probe failed (%d/%d): %s",
+                consecutive_failures, fail_threshold, e,
+            )
+            if consecutive_failures >= fail_threshold:
+                log.error(
+                    "adguard unreachable for %d probes — restarting %s",
+                    consecutive_failures, container,
+                )
+                try:
+                    _restart_container(container)
+                except Exception as re_err:
+                    log.error("adguard restart failed: %s", re_err)
+                consecutive_failures = 0
+                await asyncio.sleep(restart_cooldown)
+                continue
+        else:
+            consecutive_failures = 0
+        await asyncio.sleep(probe_interval)

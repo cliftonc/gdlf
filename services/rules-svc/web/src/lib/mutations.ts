@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, withDl } from "./api";
+import { api } from "./api";
 import { qk } from "./queries";
 import { ShortlinkSchema, type BrowserPolicy, type Platform, type RuleAction, type Shortlink } from "./schemas";
 
@@ -201,7 +201,7 @@ export function useMarkMitmInstalled(kidName: string, ip: string, dlCode?: strin
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (installed: boolean) =>
-      api(withDl(`/api/devices/${encodeURIComponent(ip)}/mitm-installed`, dlCode), {
+      api(dlCode ? `/api/dl/${encodeURIComponent(dlCode)}/mitm-installed` : `/api/devices/${encodeURIComponent(ip)}/mitm-installed`, {
         method: "PUT",
         body: { installed },
       }),
@@ -275,7 +275,7 @@ export function useMdmEnrollToken(kidName: string, dlCode?: string | null) {
   return useMutation({
     mutationFn: (ip: string) =>
       api<{ token: string; enroll_url: string; expires_at: string }>(
-        withDl(`/api/devices/${encodeURIComponent(ip)}/mdm/enroll-token`, dlCode),
+        dlCode ? `/api/dl/${encodeURIComponent(dlCode)}/mdm/enroll-token` : `/api/devices/${encodeURIComponent(ip)}/mdm/enroll-token`,
         { method: "POST" }
       ),
     onSuccess: (_data, _ip) => {
@@ -331,7 +331,7 @@ export function useAndroidMdmEnrollToken(kidName: string, dlCode?: string | null
   return useMutation({
     mutationFn: (ip: string) =>
       api<{ token_name: string; qr_url: string; expires_at: string | null }>(
-        withDl(`/api/devices/${encodeURIComponent(ip)}/android-mdm/enroll-token`, dlCode),
+        dlCode ? `/api/dl/${encodeURIComponent(dlCode)}/android-mdm/enroll-token` : `/api/devices/${encodeURIComponent(ip)}/android-mdm/enroll-token`,
         { method: "POST" }
       ),
     onSuccess: () => {
@@ -386,7 +386,7 @@ export function useWindowsMdmEnrollPackage(kidName: string, dlCode?: string | nu
   return useMutation({
     mutationFn: (ip: string) =>
       api<WindowsPackageResponse>(
-        withDl(`/api/devices/${encodeURIComponent(ip)}/windows-mdm/enroll-package`, dlCode),
+        dlCode ? `/api/dl/${encodeURIComponent(dlCode)}/windows-mdm/enroll-package` : `/api/devices/${encodeURIComponent(ip)}/windows-mdm/enroll-package`,
         { method: "POST" }
       ),
     onSuccess: (_data, ip) => {
@@ -401,7 +401,7 @@ export function useWindowsMdmMarkEnrolled(kidName: string, dlCode?: string | nul
   return useMutation({
     mutationFn: (ip: string) =>
       api<{ ok: boolean; status: string }>(
-        withDl(`/api/devices/${encodeURIComponent(ip)}/windows-mdm/mark-enrolled`, dlCode),
+        dlCode ? `/api/dl/${encodeURIComponent(dlCode)}/windows-mdm/mark-enrolled` : `/api/devices/${encodeURIComponent(ip)}/windows-mdm/mark-enrolled`,
         { method: "POST" }
       ),
     onSuccess: (_data, ip) => {

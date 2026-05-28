@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { api, withDl } from "./api";
+import { api } from "./api";
 import {
   BulkCdnGroupSchema,
   DlResolveSchema,
@@ -115,10 +115,9 @@ export function useEnrolment(name: string, ip: string, dlCode?: string | null) {
     queryKey: qk.enrolment(name, ip),
     queryFn: async () => {
       const data = await api<unknown>(
-        withDl(
-          `/api/kids/${encodeURIComponent(name)}/devices/${encodeURIComponent(ip)}/enrolment`,
-          dlCode
-        )
+        dlCode
+          ? `/api/dl/${encodeURIComponent(dlCode)}/enrolment`
+          : `/api/kids/${encodeURIComponent(name)}/devices/${encodeURIComponent(ip)}/enrolment`
       );
       return EnrolmentSchema.parse(data) as Enrolment;
     },
@@ -130,7 +129,9 @@ export function useHandshake(ip: string, enabled = true, dlCode?: string | null)
     queryKey: qk.handshake(ip),
     queryFn: async () => {
       const data = await api<unknown>(
-        withDl(`/api/devices/${encodeURIComponent(ip)}/handshake`, dlCode)
+        dlCode
+          ? `/api/dl/${encodeURIComponent(dlCode)}/handshake`
+          : `/api/devices/${encodeURIComponent(ip)}/handshake`
       );
       return HandshakeSchema.parse(data) as Handshake;
     },

@@ -47,6 +47,7 @@ https://{$MDM_HOSTNAME}:{$CADDY_HTTPS_PORT} {
             # HTTP header values. rules-svc base64-decodes back to DER and
             # parses the cert chain itself.
             header_up X-Mdm-Client-Cert-B64   {http.request.tls.client.certificate_der_base64}
+            header_up X-Gdlf-Mdm-Proxy-Secret {$MDM_PROXY_SECRET}
             header_up X-Forwarded-Proto       https
         }
     }

@@ -89,10 +89,12 @@ isn't directly forwarding packets goes through here.
 - Middleware: unauthenticated `/api/*` → JSON 401. Unauthenticated
   non-API → still serves `index.html` so the SPA can route to `/login`
   itself (the URL the user typed stays intact).
-- Public allow-list: `/healthz`, `/ca.pem`, `/ca/qr`, `/devices/{ip}/qr`,
-  `/devices/{ip}/conf` (links must be scannable from un-enrolled phones),
+- Public allow-list: `/healthz`, `/ca.pem`, `/ca/qr`, `/api/dl/*` (shortlink
+  enrolment only), `/dl/*` (shortlink SPA + code-only package downloads),
   `/api/decision`, `/api/events` (mitmproxy), `/api/auth/login`, and the
-  Vite `/assets/` bundle.
+  Vite `/assets/` bundle. IP-addressed device config routes require the
+  parent cookie; shared enrolment uses `/api/dl/{code}/conf` and
+  `/api/dl/{code}/qr`.
 
 ## Gotchas
 
@@ -402,7 +404,7 @@ Don't look for these — they don't exist:
   stays readable. Adding a new placeholder also needs a `_substitute`
   line.
 * **install.ps1 phones home at the end.** Last step POSTs
-  `<dashboard>/api/devices/<ip>/windows-mdm/mark-enrolled?dl=<shortlink>`
+  `<dashboard>/api/dl/<shortlink>/windows-mdm/mark-enrolled`
   so the parent doesn't have to click Mark Applied. Best-effort: 5
   attempts with 3s sleep then gives up. The dashboard URL is captured
   from the `Origin` header of the build request (whatever URL the

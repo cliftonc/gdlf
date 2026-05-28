@@ -128,14 +128,13 @@ class DeviceShortlink(SQLModel, table=True):
     """Short, parent-shareable code that authenticates a single device's
     enrolment page without a cookie session.
 
-    The code is the auth token for the (wg_ip) it owns: presented as
-    `?dl=<code>` on the existing `/api/devices/{ip}/...` and
-    `/api/kids/{name}/devices/{ip}/...` endpoints, the auth middleware
-    accepts it iff the path's `{ip}` matches `wg_ip`. The SPA route
-    `/dl/{code}` resolves to that device's enrolment page.
+    The code is the auth token for the (wg_ip) it owns. Public enrollment
+    calls go through code-only `/api/dl/{code}/...` endpoints rather than
+    IP-addressed routes. The SPA route `/dl/{code}` resolves to that
+    device's enrolment page.
     """
     __tablename__ = "device_shortlinks"
-    code: str = Field(primary_key=True)            # 4-char base32, uppercase
+    code: str = Field(primary_key=True)            # 8-char base32, uppercase
     wg_ip: str = Field(index=True, unique=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

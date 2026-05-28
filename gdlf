@@ -19,6 +19,75 @@ fi
 # `docker restart` cannot rejoin — they must be recreated. See CLAUDE.md.
 WG_DEPENDENTS="mitmproxy nftables blockpage adguard"
 
+env_value() {
+  local key="$1"
+  [[ -f .env ]] || return 0
+  grep -E "^${key}=" .env | head -1 | cut -d= -f2- || true
+}
+
+set_env_value() {
+  local key="$1" value="$2" tmp
+  if [[ -f .env ]] && grep -qE "^${key}=" .env; then
+    tmp=$(mktemp)
+    awk -v key="$key" -v value="$value" '
+      $0 ~ "^" key "=" { print key "=" value; next }
+      { print }
+    ' .env > "$tmp"
+    mv "$tmp" .env
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> .env
+  fi
+}
+
+random_password() {
+  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+}
+
+ensure_env_password() {
+  local key="$1" label="$2" current pw
+  current="$(env_value "$key")"
+  if [[ -z "$current" || "$current" == "change-me" ]]; then
+    pw="$(random_password)"
+    set_env_value "$key" "$pw"
+    echo "generated $label and saved to .env"
+  fi
+}
+
+require_safe_admin_password() {
+  local current
+  current="$(env_value RULES_SVC_ADMIN_PASSWORD)"
+  if [[ -z "$current" || "$current" == "change-me" ]]; then
+    cat >&2 <<EOF
+RULES_SVC_ADMIN_PASSWORD is still unset or "change-me".
+
+Run:
+  ./gdlf init
+
+or set a strong RULES_SVC_ADMIN_PASSWORD in .env before starting the dashboard.
+EOF
+    exit 1
+  fi
+}
+
+require_safe_mdm_proxy_secret() {
+  local current
+  if [[ ! -f .env ]] || ! grep -qE '^MDM_HOSTNAME=.+$' .env; then
+    return 0
+  fi
+  current="$(env_value MDM_PROXY_SECRET)"
+  if [[ -z "$current" || "$current" == "change-me" ]]; then
+    cat >&2 <<EOF
+MDM_HOSTNAME is set, but MDM_PROXY_SECRET is still unset or "change-me".
+
+Run:
+  ./gdlf init
+
+or set a strong MDM_PROXY_SECRET in .env before starting MDM.
+EOF
+    exit 1
+  fi
+}
+
 sync_wg_dependents() {
   # If wg started more recently than any dependent, recreate that dependent.
   # No-op when wg wasn't touched (timestamps unchanged) or wg isn't running.
@@ -69,15 +138,38 @@ case "$cmd" in
       fi
     fi
     mkdir -p config/state config/nft-state
+    ensure_env_password "RULES_SVC_ADMIN_PASSWORD" "RULES_SVC_ADMIN_PASSWORD"
+    ensure_env_password "MDM_PROXY_SECRET" "MDM_PROXY_SECRET"
     echo "running ./scripts/gen-ca.sh (mitmproxy CA)..."
     ./scripts/gen-ca.sh
     echo "running ./scripts/init-adguard.sh (skip wizard, seed admin)..."
     ./scripts/init-adguard.sh
     echo "init done. Now: ./gdlf up"
     ;;
-  up)        $COMPOSE up -d "$@"; sync_wg_dependents ;;
+  up)        require_safe_admin_password; require_safe_mdm_proxy_secret; $COMPOSE up -d "$@"; sync_wg_dependents ;;
   down)      $COMPOSE down "$@" ;;
-  restart)   $COMPOSE restart "$@"; sync_wg_dependents ;;
+  restart)
+    if (( $# == 0 )); then
+      # Full restart, ordered:
+      #   1. wg            — its netns is rebuilt
+      #   2. wg sharers    — must be recreated (docker restart can't re-attach
+      #                      a container to wg's freshly-rebuilt netns)
+      #   3. everything else (rules-svc, caddy) to pick up clean upstream state
+      echo "[restart] wg…"
+      $COMPOSE restart wg
+      echo "[restart] recreating wg netns sharers ($WG_DEPENDENTS)…"
+      $COMPOSE up -d --force-recreate --no-deps $WG_DEPENDENTS
+      others=$($COMPOSE config --services 2>/dev/null \
+        | grep -vxE "wg|$(echo $WG_DEPENDENTS | tr ' ' '|')" || true)
+      if [[ -n "$others" ]]; then
+        echo "[restart] $(echo $others | tr '\n' ' ')…"
+        $COMPOSE restart $others
+      fi
+    else
+      $COMPOSE restart "$@"
+      sync_wg_dependents
+    fi
+    ;;
   logs)      $COMPOSE logs -f --tail=200 "$@" ;;
   ps)        $COMPOSE ps ;;
   shell)
@@ -85,6 +177,8 @@ case "$cmd" in
     $COMPOSE exec "$svc" /bin/sh
     ;;
   rebuild)
+    require_safe_admin_password
+    require_safe_mdm_proxy_secret
     $COMPOSE build --no-cache "$@"
     $COMPOSE up -d "$@"
     sync_wg_dependents

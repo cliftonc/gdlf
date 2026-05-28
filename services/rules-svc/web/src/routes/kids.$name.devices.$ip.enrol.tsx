@@ -606,9 +606,8 @@ function TrashIcon({ className }: { className?: string }) {
 }
 
 /** Shared by the cookie-authenticated /kids/$name/devices/$ip/enrol route
- *  and the public /dl/$code route. Pass `dlCode` on the public path so all
- *  device-scoped API calls authenticate via `?dl=<code>` rather than the
- *  parent's session cookie. */
+ *  and the public /dl/$code route. Pass `dlCode` on the public path so it
+ *  uses code-only /api/dl/* endpoints rather than the parent's session. */
 export function EnrolView({
   name,
   ip,

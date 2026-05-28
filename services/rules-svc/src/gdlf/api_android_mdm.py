@@ -28,7 +28,7 @@ import qrcode
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
-from . import store
+from . import api_shortlinks, store
 from .amapi import client as amapi_client, enrollment, orchestrator, policy
 from .schema import AndroidMdmState
 
@@ -66,8 +66,7 @@ class EnrollTokenResponse(BaseModel):
     expires_at: datetime | None = None
 
 
-@router.post("/api/devices/{ip}/android-mdm/enroll-token")
-def create_enroll_token(ip: str) -> EnrollTokenResponse:
+def _create_enroll_token(ip: str, code: str | None = None) -> EnrollTokenResponse:
     _require_amapi()
     _, kid, device = _device_or_404(ip)
 
@@ -114,9 +113,20 @@ def create_enroll_token(ip: str) -> EnrollTokenResponse:
 
     return EnrollTokenResponse(
         token_name=tok.get("name", ""),
-        qr_url=f"/devices/{ip}/android-mdm/qr.png",
+        qr_url=f"/api/dl/{code}/android-mdm/qr.png" if code else f"/devices/{ip}/android-mdm/qr.png",
         expires_at=expires_at,
     )
+
+
+@router.post("/api/devices/{ip}/android-mdm/enroll-token")
+def create_enroll_token(ip: str) -> EnrollTokenResponse:
+    return _create_enroll_token(ip)
+
+
+@router.post("/api/dl/{code}/android-mdm/enroll-token")
+def create_enroll_token_by_code(code: str) -> EnrollTokenResponse:
+    _, device = api_shortlinks.device_for_code(code)
+    return _create_enroll_token(device.wg_ip, code=code)
 
 
 def _parse_expires(s: str | None) -> datetime | None:
@@ -140,6 +150,12 @@ def enroll_qr_png(ip: str) -> Response:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@router.get("/api/dl/{code}/android-mdm/qr.png")
+def enroll_qr_png_by_code(code: str) -> Response:
+    _, device = api_shortlinks.device_for_code(code)
+    return enroll_qr_png(device.wg_ip)
 
 
 # --- Admin: re-push policy / refresh status --------------------------------

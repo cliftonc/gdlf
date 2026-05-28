@@ -155,6 +155,7 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:-}
       CADDY_HTTPS_PORT: ${CADDY_HTTPS_PORT:-8081}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      MDM_PROXY_SECRET: ${MDM_PROXY_SECRET:-}
     networks: [gdlf]
     # Docker's embedded resolver at 127.0.0.11 doesn't return SOA records,
     # which breaks libdns's zone discovery for ACME DNS-01 challenges.
@@ -194,12 +195,13 @@ services:
       # MDM enrollment profiles need a public URL that devices can reach.
       # e.g. https://gdlf.cliftonc.nl:8443  — empty disables /mdm/* endpoints.
       MDM_BASE_URL: ${MDM_BASE_URL:-}
+      MDM_PROXY_SECRET: ${MDM_PROXY_SECRET:-}
     volumes:
       - ./config/kids.yaml:/etc/gdlf/kids.yaml
       - ./config/wg:/etc/wireguard          # rules-svc writes wg0.conf here
       - ./config/mitmproxy:/etc/gdlf/mitmproxy
       - ./config/state:/var/lib/gdlf
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # used to `docker kill -s HUP gdlf-wg`
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # used to reload/restart gdlf-wg + dashboard stats
     ports:
       - "${DASHBOARD_PORT}:8080"
     networks:

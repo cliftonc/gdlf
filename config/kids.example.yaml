@@ -18,9 +18,9 @@ kids:
     # AdGuard blocked-service IDs — toggle via the dashboard's "Services"
     # tab on the kid. Catalog comes from AdGuard (/control/blocked_services/all).
     blocked_apps: []
-    url_rules:
-      # Examples — first match wins.
-      # - { action: block, match: "youtube.com/shorts/*" }
-      # - { action: block, match: "*/search", query: "q=.*\\bweed\\b.*", flag: true }
-      # - { action: allow, match: "youtube.com/@KhanAcademy/*" }
+    # url_rules — first match wins. Examples:
+    # - { action: block, match: "youtube.com/shorts/*" }
+    # - { action: block, match: "*/search", query: "q=.*\\bweed\\b.*", flag: true }
+    # - { action: allow, match: "youtube.com/@KhanAcademy/*" }
+    url_rules: []
     keyword_flags: []

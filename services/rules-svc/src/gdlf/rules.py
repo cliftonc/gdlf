@@ -116,6 +116,19 @@ def suggest_match(host: str, path: str) -> dict[str, str | None]:
     return {"host": host, "path": f"/{'/'.join(take)}/*"}
 
 
+def effective_inspect_hosts(kid: Kid) -> list[str]:
+    """Hosts the addon will actually decrypt for this kid."""
+    return sorted({*kid.mitm_inspect_hosts, *hosts_with_block_or_flag_rules(kid)})
+
+
+def effective_host_in_inspect(kid: Kid, host: str) -> bool:
+    """True when `host` matches the effective addon inspect list."""
+    for pat in effective_inspect_hosts(kid):
+        if _host_matches(pat, host):
+            return True
+    return False
+
+
 def evaluate(kid: Kid, host: str, path: str = "/", query: str | None = None) -> Decision:
     """Walk the kid's url_rules top-to-bottom. First match wins.
 
@@ -123,11 +136,12 @@ def evaluate(kid: Kid, host: str, path: str = "/", query: str | None = None) -> 
     `flag` attribute is true if a matched rule had flag=true *or* if the
     rule's action itself is 'flag'.
 
-    The MITM-status of `host` is derived from `kid.mitm_inspect_hosts`. For
-    non-MITM hosts the evaluator silently drops any path/query predicates,
-    so the rule degrades to a host-only match.
+    The MITM-status of `host` mirrors the addon's effective inspect list:
+    explicit inspect hosts plus hosts from block/flag rules. For non-MITM
+    hosts the evaluator silently drops any path/query predicates, so the
+    rule degrades to a host-only match.
     """
-    host_is_mitm = host_in_inspect(kid, host)
+    host_is_mitm = effective_host_in_inspect(kid, host)
     for rule in kid.url_rules:
         if match_rule(rule, host, path, query, host_is_mitm=host_is_mitm):
             return Decision(
