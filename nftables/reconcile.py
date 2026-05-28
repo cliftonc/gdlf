@@ -275,6 +275,13 @@ def flush_conntrack(ip: str) -> None:
         )
 
 
+def _kids_mtime() -> float:
+    try:
+        return KIDS_YAML.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def main() -> int:
     print(f"[gdlf-nft] starting. kids={KIDS_YAML} adguard={ADGUARD_IP} mitm={MITM_IP} interval={INTERVAL}s")
     last_hash = None
@@ -300,7 +307,18 @@ def main() -> int:
                 last_blocked = blocked
         except Exception as e:
             print(f"[gdlf-nft] error: {e}", file=sys.stderr)
-        time.sleep(INTERVAL)
+        # Sleep up to INTERVAL but wake early when kids.yaml is touched, so
+        # dashboard toggles (block / schedule / mitm flag) take effect within
+        # ~1s instead of waiting out the full poll cycle.
+        deadline = time.monotonic() + INTERVAL
+        baseline_mtime = _kids_mtime()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
+            if _kids_mtime() != baseline_mtime:
+                break
 
 
 if __name__ == "__main__":
