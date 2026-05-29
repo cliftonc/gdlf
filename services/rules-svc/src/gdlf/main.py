@@ -188,6 +188,7 @@ _PUBLIC_API_PATHS = {
     "/api/decision",
     "/api/events",
     "/api/passthrough",
+    "/api/passthrough/stream",
     "/api/tls-failures",
     "/api/auth/login",
 }
