@@ -32,6 +32,7 @@ def get_settings() -> dict:
         "adguard_ui_port": settings.adguard_ui_port,
         "adguard_admin_user": "admin",
         "adguard_admin_password": settings.adguard_admin_password,
+        "internal_url": settings.internal_url,
         "db_stats": {
             "events": s["events"],
             "oldest": s["oldest"].isoformat() if s["oldest"] else None,

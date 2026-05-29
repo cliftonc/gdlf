@@ -278,6 +278,7 @@ export const SettingsSchema = z.object({
   adguard_ui_port: z.number(),
   adguard_admin_user: z.string(),
   adguard_admin_password: z.string(),
+  internal_url: z.string(),
   db_stats: z.object({
     events: z.number(),
     oldest: z.string().nullable(),

@@ -151,7 +151,11 @@ function SettingsPage() {
           <div>
             <Button
               as="a"
-              href={`${window.location.protocol}//${window.location.hostname}:${s.data.adguard_ui_port}/`}
+              href={
+                s.data.internal_url
+                  ? `${s.data.internal_url}:${s.data.adguard_ui_port}/`
+                  : `${window.location.protocol}//${window.location.hostname}:${s.data.adguard_ui_port}/`
+              }
               target="_blank"
               rel="noreferrer"
               color="primary"

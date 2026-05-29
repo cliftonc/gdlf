@@ -13,6 +13,12 @@ class Settings:
     adguard_url: str
     adguard_admin_password: str
     adguard_ui_port: int
+    # LAN-side base URL (scheme+host, no port). When set, the dashboard
+    # prefers it over `window.location.hostname` when linking to co-hosted
+    # services (AdGuard admin etc.) — useful when WG_HOST is a public DNS
+    # name but the parent is browsing from the same LAN. Empty = use the
+    # browser's current hostname (the legacy behaviour).
+    internal_url: str
     admin_password: str
     alert_webhook_url: str | None
     smtp_host: str | None
@@ -58,6 +64,7 @@ class Settings:
             adguard_url=os.environ.get("ADGUARD_URL", "http://adguard:80"),
             adguard_admin_password=os.environ.get("ADGUARD_ADMIN_PASSWORD", ""),
             adguard_ui_port=int(os.environ.get("ADGUARD_UI_PORT") or 8082),
+            internal_url=(os.environ.get("INTERNAL_URL") or "").rstrip("/"),
             admin_password=os.environ.get("ADMIN_PASSWORD", ""),
             alert_webhook_url=os.environ.get("ALERT_WEBHOOK_URL") or None,
             smtp_host=os.environ.get("SMTP_HOST") or None,
