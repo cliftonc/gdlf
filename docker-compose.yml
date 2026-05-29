@@ -41,6 +41,16 @@ services:
     networks:
       gdlf:
         ipv4_address: 10.42.0.2
+    # Healthcheck = wg0 is up. Sharer containers (adguard / mitm / blockpage /
+    # nftables) gate on this so they can't join the netns before wg-quick has
+    # actually attached the interface — that race was producing dead listeners
+    # on cold starts.
+    healthcheck:
+      test: ["CMD-SHELL", "wg show wg0 >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   nftables:
     build: ./nftables
@@ -57,7 +67,9 @@ services:
       MITM_IP: 10.42.0.11
       WG_SUBNET: ${WG_SUBNET}
       TZ: ${TZ}
-    depends_on: [wg]
+    depends_on:
+      wg:
+        condition: service_healthy
 
   adguard:
     image: adguard/adguardhome:latest
@@ -70,7 +82,9 @@ services:
     volumes:
       - ./config/adguard/work:/opt/adguardhome/work
       - ./config/adguard/conf:/opt/adguardhome/conf
-    depends_on: [wg]
+    depends_on:
+      wg:
+        condition: service_healthy
 
   blockpage:
     # Tiny HTTP server (port 8888) that returns a "you're out of allowed
@@ -80,7 +94,9 @@ services:
     container_name: gdlf-blockpage
     restart: unless-stopped
     network_mode: "service:wg"
-    depends_on: [wg]
+    depends_on:
+      wg:
+        condition: service_healthy
 
   mitmproxy:
     build: ./services/mitmproxy
@@ -125,7 +141,9 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-    depends_on: [wg]
+    depends_on:
+      wg:
+        condition: service_healthy
 
   caddy:
     # TLS front-door for the MDM endpoints. Validates device client certs

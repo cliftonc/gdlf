@@ -184,11 +184,33 @@ def write_wg0_conf(cfg: KidsConfig) -> Path:
     return p
 
 
+# Containers that share wg's netns via `network_mode: "service:wg"`. When
+# the wg container is restarted, its netns is destroyed and a new one
+# created — sharers keep a dead pointer and lose all networking until
+# they're restarted too. Mirrors `WG_DEPENDENTS` in the top-level `gdlf`
+# script (single source of truth lives in compose's depends_on graph; this
+# list is the tactical mirror used by the in-band reload path).
+_WG_NETNS_SHARERS = ("gdlf-nft", "gdlf-mitm", "gdlf-blockpage", "gdlf-adguard")
+
+
+def _restart_netns_sharers() -> None:
+    """Restart wg's netns sharers so they re-attach to the new netns."""
+    for name in _WG_NETNS_SHARERS:
+        try:
+            _docker_restart(name)
+        except Exception:
+            # Best-effort: a missing sharer (mdm profile off, mid-boot) is
+            # fine, the next ./gdlf up will line things up.
+            pass
+
+
 def reload_wg() -> None:
     """Reload the wg container so it picks up the new wg0.conf.
 
-    Tries `wg syncconf` first (no peer drops). Falls back to a container
-    restart (~2s downtime) if syncconf fails or wg0 doesn't exist yet.
+    Tries `wg syncconf` first (no peer drops, no netns churn). Falls back
+    to a container restart (~2s downtime) if syncconf fails or wg0 doesn't
+    exist yet — in which case the netns gets rebuilt and we must also
+    bounce every container sharing it, or they're left with stale routes.
     """
     container = os.environ.get("WG_CONTAINER", "gdlf-wg")
     if not _docker_available():
@@ -204,6 +226,7 @@ def reload_wg() -> None:
         pass
     try:
         _docker_restart(container)
+        _restart_netns_sharers()
     except Exception:
         pass
 
