@@ -256,30 +256,60 @@ class GdlfAddon:
         if self._passthrough_task is None:
             self._passthrough_task = asyncio.create_task(self._passthrough_refresh_loop())
 
+    async def _fetch_passthrough(self) -> None:
+        r = await self._client.get(f"{RULES_SVC_URL}/api/passthrough")
+        r.raise_for_status()
+        body = r.json() or {}
+        by_ip = body.get("by_ip") or {}
+        self._passthrough = {
+            ip: [str(h).lower() for h in hosts]
+            for ip, hosts in by_ip.items()
+        }
+        inspect = body.get("inspect_by_ip") or {}
+        self._inspect = {
+            ip: [str(h).lower() for h in hosts]
+            for ip, hosts in inspect.items()
+        }
+        globs = body.get("globals")
+        if isinstance(globs, list) and globs:
+            self._bulk_cdn = tuple(str(g).lower() for g in globs)
+        blocked = body.get("blocked_ips")
+        if isinstance(blocked, list):
+            self._blocked_ips = frozenset(str(ip) for ip in blocked)
+
     async def _passthrough_refresh_loop(self) -> None:
+        """Stream-driven refresh.
+
+        Subscribes to `/api/passthrough/stream` and re-fetches state on each
+        config-changed ping, so dashboard toggles (block / inspect / CA
+        installed) take effect within ~100ms instead of waiting out the
+        polling cycle. Falls back to PASSTHROUGH_REFRESH_SECS polling if
+        the stream drops (rules-svc restart, network blip, etc.).
+        """
         while True:
             try:
-                r = await self._client.get(f"{RULES_SVC_URL}/api/passthrough")
-                r.raise_for_status()
-                body = r.json() or {}
-                by_ip = body.get("by_ip") or {}
-                self._passthrough = {
-                    ip: [str(h).lower() for h in hosts]
-                    for ip, hosts in by_ip.items()
-                }
-                inspect = body.get("inspect_by_ip") or {}
-                self._inspect = {
-                    ip: [str(h).lower() for h in hosts]
-                    for ip, hosts in inspect.items()
-                }
-                globs = body.get("globals")
-                if isinstance(globs, list) and globs:
-                    self._bulk_cdn = tuple(str(g).lower() for g in globs)
-                blocked = body.get("blocked_ips")
-                if isinstance(blocked, list):
-                    self._blocked_ips = frozenset(str(ip) for ip in blocked)
+                # Pull current state before subscribing so a freshly-started
+                # mitm reflects kids.yaml without waiting for the first ping.
+                await self._fetch_passthrough()
+                async with self._client.stream(
+                    "GET",
+                    f"{RULES_SVC_URL}/api/passthrough/stream",
+                    timeout=None,
+                ) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        # SSE delivers lines like "event: config-changed"
+                        # followed by "data: {}" and a blank separator.
+                        # A data line is the only signal we need.
+                        if line.startswith("data:"):
+                            try:
+                                await self._fetch_passthrough()
+                            except Exception as e:
+                                self._log.debug("passthrough refresh on wake failed: %s", e)
             except Exception as e:
-                self._log.debug("passthrough refresh failed: %s", e)
+                self._log.debug("passthrough stream dropped: %s", e)
+            # Either the stream closed or fetch failed; sit out the poll
+            # interval before reconnecting so we don't hot-loop on outage.
             await asyncio.sleep(PASSTHROUGH_REFRESH_SECS)
 
     def _inspect_match(self, client_ip: str, sni: str) -> bool:

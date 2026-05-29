@@ -39,3 +39,34 @@ async def subscribe() -> AsyncIterator[dict]:
     async with _subscription() as q:
         while True:
             yield await q.get()
+
+
+# ---- Config-change channel (separate from activity events) ----
+#
+# Wakes consumers like the mitmproxy addon whenever kids.yaml mutates,
+# so toggling block / inspect in the dashboard reaches the addon in
+# tens of ms rather than waiting out its polling cycle. Payload is a
+# trivial ping — subscribers fetch the current state themselves.
+
+_config_subscribers: set[asyncio.Queue] = set()
+
+
+def publish_config_changed() -> None:
+    """Wake every subscriber to the config channel. Non-blocking."""
+    for q in list(_config_subscribers):
+        try:
+            q.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+
+async def subscribe_config_changes() -> AsyncIterator[None]:
+    """Yield one ping per kids.yaml mutation. Consumer responsible for
+    fetching the new state."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=8)
+    _config_subscribers.add(q)
+    try:
+        while True:
+            yield await q.get()
+    finally:
+        _config_subscribers.discard(q)

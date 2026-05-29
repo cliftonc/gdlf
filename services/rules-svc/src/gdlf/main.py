@@ -26,6 +26,7 @@ import qrcode.image.svg
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
+from sse_starlette.sse import EventSourceResponse
 
 from . import (
     adguard,
@@ -428,7 +429,8 @@ def get_passthrough():
 
     Splice-by-default: in `tls_clienthello` the addon only MITMs a flow when
     its SNI matches the inspect list; everything else is `ignore_connection`.
-    The addon polls this every ~30s.
+    The addon wakes on `/api/passthrough/stream` (SSE) and re-fetches here;
+    falls back to a 30s poll if the stream drops.
 
       * `inspect_by_ip` — per-kid SNIs (globs) we DECRYPT for URL-path rules.
                           Built from `INSPECT_GLOBAL_DEFAULTS` ∪ each kid's
@@ -470,6 +472,27 @@ def get_passthrough():
         "globals": list(bulk_cdns.BULK_CDN_PATTERNS),
         "blocked_ips": blocked,
     })
+
+
+@app.get("/api/passthrough/stream")
+async def passthrough_stream(request: Request) -> EventSourceResponse:
+    """SSE wake channel for the mitmproxy addon.
+
+    Emits a `config-changed` ping per kids.yaml mutation so the addon can
+    re-fetch `/api/passthrough` instantly instead of polling on a 30s
+    cycle. The 15s heartbeat keeps the connection through aggressive
+    intermediaries; the addon falls back to polling on disconnect.
+
+    Same public-but-trusted stance as `/api/passthrough` (the mitm
+    container reaches us over the gdlf bridge, no cookie).
+    """
+    async def gen():
+        async for _ in pubsub.subscribe_config_changes():
+            if await request.is_disconnected():
+                break
+            yield {"event": "config-changed", "data": "{}"}
+
+    return EventSourceResponse(gen(), ping=15)
 
 
 @app.get("/api/bulk-cdns")

@@ -58,6 +58,11 @@ def _signal_mutation() -> None:
     if _mutation_event is None or _mutation_loop is None:
         return
     _mutation_loop.call_soon_threadsafe(_mutation_event.set)
+    # Mirror onto pubsub's config channel so multi-subscriber consumers
+    # (mitm addon's SSE wake) get fanned out without racing the single
+    # asyncio.Event above.
+    from . import pubsub
+    _mutation_loop.call_soon_threadsafe(pubsub.publish_config_changed)
 
 
 def _path() -> Path:
