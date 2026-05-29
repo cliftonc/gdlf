@@ -151,7 +151,7 @@ standalone `docker-compose` binary.
 | URL block rule "doesn't fire"            | Browser cache served the page; no request reached mitmproxy   | Hard refresh on device                                   |
 | mitmproxy stops responding               | FD exhaustion                                                 | `ulimits.nofile` in compose; restart `gdlf-mitm`         |
 | AdGuard sees every query as `10.42.0.2`  | adguard not in wg netns (regression)                          | compose: `network_mode: "service:wg"` on adguard service |
-| nft sees no `wg0` interface              | nft netns orphaned by wg restart                              | Restart `gdlf-nft` (and adguard/mitm/blockpage)          |
+| nft sees no `wg0` interface              | nft netns orphaned by wg restart (should be auto-handled now) | `./gdlf restart` — verify wg is healthy before sharers   |
 | Events not appearing after block         | Addon crashed silently (template / KeyError)                  | `docker logs gdlf-mitm` for tracebacks                   |
 
 ## Pragmatic boundaries (intentional)

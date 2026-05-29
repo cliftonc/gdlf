@@ -17,11 +17,14 @@ to `127.0.0.1:<port>` actually lands somewhere.
 `reconcile.py` runs forever:
 
 ```
-every INTERVAL (default 30s):
+loop:
   cfg     = yaml.safe_load(kids.yaml)
   ruleset = render(cfg, now())
   if hash(ruleset) != last_hash:
     nft -f - < ruleset    # atomic replace via 'destroy table; table ... {...}'
+  # Sleep up to INTERVAL (default 30s), but wake early if kids.yaml's mtime
+  # moves. Dashboard toggles (block / schedule / mitm flag) take effect
+  # within ~1s instead of waiting out the full poll cycle.
 ```
 
 The ruleset is regenerated as a whole each cycle, with `destroy table inet
@@ -97,7 +100,13 @@ table inet gdlf {
 * **wg restart orphans this container.** Because we share wg's netns, when
   wg's netns is destroyed (container restart) we keep a stale handle to
   the old netns and lose all network. `docker restart gdlf-nft` re-attaches.
-  Same hazard for adguard, mitmproxy, blockpage.
+  Same hazard for adguard, mitmproxy, blockpage. The in-band reload path
+  (rules-svc's `wg.reload_wg()` fallback) restarts all four sharers
+  automatically after restarting wg; the `./gdlf` script's `restart` /
+  `sync_wg_dependents` paths do the same. The compose-level fix is the
+  `depends_on: { wg: condition: service_healthy }` plus wg's `wg show wg0`
+  healthcheck — on cold `./gdlf up`, sharers can't even start before
+  wg's interface is verified up.
 
 * **No conntrack-tools by default.** `apk add conntrack-tools` if you
   need to inspect NAT state for debugging.

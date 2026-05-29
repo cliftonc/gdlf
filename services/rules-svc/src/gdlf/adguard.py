@@ -3,7 +3,14 @@
 Each kid maps to one AdGuard "client" entry per device (keyed by WG IP).
 We push per-client `blocked_services` (from `kid.blocked_apps`) so AdGuard
 filters DNS for that kid specifically. The sync is one-way
-(kids.yaml -> AdGuard), idempotent, runs every minute and on kids.yaml change.
+(kids.yaml -> AdGuard), idempotent, event-driven on `store.mutation_event`
+with a 5-minute backstop that also refreshes the services-catalog index.
+
+A reachability watchdog (`health_watchdog_loop`) probes `/control/status`
+over the gdlf bridge every 30s — same path rules-svc itself uses — and
+asks docker to restart `gdlf-adguard` after 3 consecutive failures.
+Catches the boot race where AdGuard's loopback works but its bridge-IP
+listener is wedged. Disabled cleanly if the docker socket isn't mounted.
 
 We *also* keep a local index of which hostnames each AdGuard service covers
 (parsed from the catalog's `||domain^` rules) so the mitmproxy decision path

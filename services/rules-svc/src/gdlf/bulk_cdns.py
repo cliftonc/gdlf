@@ -3,9 +3,10 @@
 These are hostname globs (fnmatch syntax) that mitmproxy passes through
 untouched at the TLS layer — no decrypt/re-encrypt, no per-request decision
 call, no activity-log entry. The single source of truth lives here in
-rules-svc; the mitmproxy addon polls `/api/passthrough` and reads the
-`globals` key, so updating this file + restarting rules-svc applies to
-mitm within one refresh cycle (~30s).
+rules-svc; the mitmproxy addon wakes on `/api/passthrough/stream` (SSE)
+and re-fetches `/api/passthrough` (`globals` key included), so updating
+this file + restarting rules-svc applies to mitm within ~100ms. A 30s
+poll fallback kicks in if the stream drops.
 
 Criteria for adding here:
   (1) Traffic is bulk-binary, already vendor-signed, and never something

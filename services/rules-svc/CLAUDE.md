@@ -13,7 +13,7 @@ isn't directly forwarding packets goes through here.
 3. **Source-of-truth I/O** — read & write `config/kids.yaml` under filelock.
 4. **WireGuard control** — generate device keypairs, allocate `/32` IPs,
    render `wg0.conf`, reload the wg container via the docker socket.
-5. **AdGuard sync** — push one `gdlf:<kid>:<device>` client per WG IP every 60s.
+5. **AdGuard sync** — push one `gdlf:<kid>:<device>` client per WG IP. Event-driven (wakes on every `store.mutate()`) with a 5-minute backstop that also refreshes the services-catalog index. A reachability watchdog probes AdGuard from the gdlf bridge every 30s and asks docker to restart it after 3 consecutive failures (catches the cold-start netns race where AdGuard's bridge-IP listener doesn't come up cleanly).
 6. **Event ingest** from the addon → SQLite + SSE fanout to live subscribers.
 7. **Alerting** — fire webhook + email on `flag` events.
 8. **Retention** — prune the events table hourly, VACUUM daily.
@@ -46,7 +46,7 @@ isn't directly forwarding packets goes through here.
 | `aggregates.py`  | Per-kid counters derived from `event` via SQL aggregation (no in-memory accumulator). |
 | `api_stats.py`   | `/api/stats/overview` and `/api/stats/kid/{name}` — wraps `aggregates`. |
 | `api_tls_failures.py` | `/api/tls-failures` — reads `event` rows with `decision='tls_failed'`, grouped by registrable domain. |
-| `adguard.py`     | REST-API client + 60s sync loop.                                      |
+| `adguard.py`     | REST-API client + event-driven sync loop + bridge-reachability watchdog. |
 | `alerts.py`      | Webhook + SMTP dispatcher; logs each attempt to `AlertLog`.           |
 | `auth.py`        | HMAC cookie token primitives.                                         |
 | `addons/mitm_capture.py` | mitmproxy addon (mounted into the mitm container). Splice-by-default in `tls_clienthello`: only SNIs in `INSPECT_GLOBAL_DEFAULTS` (bulk_cdns.py) ∪ per-kid `mitm_inspect_hosts` get terminated for URL-path rules. Everything else is `ignore_connection = True`. |
@@ -59,7 +59,7 @@ isn't directly forwarding packets goes through here.
 | Browser SPA | browser → svc     | HTTP JSON `/api/*` + SSE `/api/activity/stream` | Dashboard UI         |
 | mitmproxy   | mitm → svc        | HTTP POST `/api/decision`           | Per-request allow/block/flag         |
 | mitmproxy   | mitm → svc        | HTTP POST `/api/events`             | Log every request                    |
-| AdGuard     | svc → adguard     | HTTP REST (`10.42.0.2:80`)          | Push per-client config every 60s     |
+| AdGuard     | svc → adguard     | HTTP REST (`10.42.0.2:80`)          | Push per-client config on each `kids.yaml` mutation (5-min backstop) |
 | wg (docker) | svc → docker.sock | `httpx` over `/var/run/docker.sock` | exec `wg syncconf`, restart on reload|
 | kids.yaml   | both ways         | filesystem (`config/kids.yaml`)     | Source of truth                      |
 | nftables    | none directly     | nft reads kids.yaml on its own loop | We publish via yaml, no push         |
